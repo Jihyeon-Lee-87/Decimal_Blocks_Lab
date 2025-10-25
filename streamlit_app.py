@@ -1,29 +1,74 @@
 # -*- coding: utf-8 -*-
-# Decimal Blocks 3D — Add/Sub up to Thousandths + 교사 대시보드 연동(제출 폼 포함)
-# - 말풍선 4초(메인 큰 알림) → 깜빡임 → 변환
+# Decimal Blocks 3D — Add/Sub up to Thousandths + DB + 교사 인증 배지/미니패널
 # - 덧셈: 하나씩 이동 + 받아올림 강조, 완료 시 효과음
-# - 뺄셈: 시작 시 A를 결과판에 '즉시' 반영(애니메이션 없음) → 자리별 차감(받아내림 강조)
-# - 뺄셈 차감 중 덜어내는 수 숫자/블록도 함께 감소(1:1 대응)
-# - 사이드바: 역할/교사 인증 + 첫번째/두번째 수 입력 + 소리 버튼
-# - 하단: 학생 제출 폼(세션에 누적) → pages/1_교사_대시보드.py에서 집계
+# - 뺄셈: 시작 시 A를 결과판에 '즉시' 반영 → 자리별 차감(받아내림 강조, 문구 수정)
+# - 제출: SQLite DB에 기록 → 교사 대시보드/미니패널에서 공용 조회
+# - 사이드바: 역할/교사 인증(+학생 전환 시 인증 해제) + 수 입력 + 소리 버튼
+# - 하단: 학생 제출 폼(학급: 4-사랑/4-기쁨/4-보람/4-행복/기타)
 
-import os, base64, time
+import os, base64, time, sqlite3
+from contextlib import closing
 from typing import Optional, Tuple
 import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import streamlit as st
 
-# ────────── 세션 기본값 보장 ──────────
+# ────────── 세션 기본값 ──────────
 def ensure_defaults():
     ss = st.session_state
-    ss.setdefault("submissions", [])
+    ss.setdefault("submissions", [])  # (과거 세션용 잔존, 현재는 DB 사용)
     ss.setdefault("teacher_ok", False)
     ss.setdefault("A", 1.257)   # 첫번째 수
     ss.setdefault("B", 0.078)   # 두번째 수
 ensure_defaults()
 
-# ────────── 글꼴 ──────────
+# ────────── DB 유틸 (공용 SQLite) ──────────
+@st.cache_resource
+def get_conn():
+    conn = sqlite3.connect("submissions.db", check_same_thread=False)
+    with conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS submissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                class TEXT,
+                nickname TEXT,
+                quest TEXT,
+                rubric_1 INTEGER,
+                rubric_2 INTEGER,
+                rubric_3 INTEGER,
+                rubric_total INTEGER
+            )
+        """)
+    return conn
+
+def add_submission(row: dict):
+    conn = get_conn()
+    with conn:
+        conn.execute("""
+            INSERT INTO submissions
+            (timestamp, class, nickname, quest, rubric_1, rubric_2, rubric_3, rubric_total)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            row["timestamp"], row["class"], row["nickname"], row["quest"],
+            row["rubric_1"], row["rubric_2"], row["rubric_3"], row["rubric_total"]
+        ))
+
+def fetch_recent(n=5):
+    conn = get_conn()
+    with closing(conn.cursor()) as cur:
+        cur.execute("""
+            SELECT timestamp, class, nickname, quest, rubric_total
+            FROM submissions
+            ORDER BY datetime(timestamp) DESC
+            LIMIT ?
+        """, (n,))
+        cols = ["timestamp","class","nickname","quest","rubric_total"]
+        rows = cur.fetchall()
+    return cols, rows
+
+# ────────── 글꼴/스타일 ──────────
 matplotlib.rcParams["font.family"] = [
     "Noto Sans CJK KR", "NanumGothic", "Apple SD Gothic Neo",
     "Malgun Gothic", "DejaVu Sans"
@@ -51,7 +96,7 @@ BLINK_CYCLES        = 2
 BLINK_INTERVAL      = 0.60
 CARRY_PAUSE_BEFORE  = 0.70
 CARRY_PAUSE_AFTER   = 0.70
-ALERT_SECONDS       = 4.0      # 메인 말풍선 표시시간(요청: 4초)
+ALERT_SECONDS       = 4.0      # 메인 말풍선 표시시간
 
 # ────────── 숫자 분해 ──────────
 def split_digits(x: float):
@@ -161,12 +206,13 @@ def play_sound(t: Optional[Tuple[bytes,str]]):
         unsafe_allow_html=True
     )
 
-# ────────── 사이드바(역할/인증 + 문제 입력 + 소리) ──────────
+# ────────── 사이드바 ──────────
 with st.sidebar:
     st.markdown("### 역할 선택 / 문제 설정 / 소리")
 
-    # 역할 & 교사 인증
     role = st.radio("역할", ["학생", "교사"], horizontal=True, key="role_sel")
+    if role == "학생":
+        st.session_state["teacher_ok"] = False  # 학생으로 전환 시 인증 풀기
     if role == "교사":
         pw = st.text_input("교사 비밀번호", type="password", help="관리자가 정한 비밀번호를 입력하세요.")
         teacher_pw = os.environ.get("TEACHER_PW", "teacher")
@@ -177,30 +223,20 @@ with st.sidebar:
             st.error("비밀번호가 올바르지 않습니다.")
 
     st.divider()
-
-    # 문제 수 입력(학생이 바꾸는 곳)
     st.markdown("#### 문제 수 입력")
-    st.number_input(
-        "첫번째 수 (0.000~9.999)",
-        min_value=0.000, max_value=9.999,
-        value=float(st.session_state.get("A", 1.257)),
-        step=0.001, format="%.3f", key="A"
-    )
-    st.number_input(
-        "두번째 수 (0.000~9.999)",
-        min_value=0.000, max_value=9.999,
-        value=float(st.session_state.get("B", 0.078)),
-        step=0.001, format="%.3f", key="B"
-    )
-
-    st.caption("교사용 대시보드는 왼쪽 상단 메뉴 ▶ pages ▶ ‘교사 대시보드’에서 열 수 있어요.")
+    st.number_input("첫번째 수 (0.000~9.999)", min_value=0.000, max_value=9.999,
+                    value=float(st.session_state.get("A", 1.257)),
+                    step=0.001, format="%.3f", key="A")
+    st.number_input("두번째 수 (0.000~9.999)", min_value=0.000, max_value=9.999,
+                    value=float(st.session_state.get("B", 0.078)),
+                    step=0.001, format="%.3f", key="B")
 
     st.divider()
     if st.button("🔊 소리 켜기"):
         play_sound(SND_OK)
         st.success("소리 사용이 허용되었습니다.")
 
-# 교사 대시보드 안내(본문) + 인증 배지
+# 교사 인증 배지/안내
 if st.session_state.get("teacher_ok", False):
     st.markdown(
         """
@@ -220,24 +256,20 @@ ALERT = st.empty()
 def show_alert(text: str, seconds: float = ALERT_SECONDS):
     ALERT.markdown(
         f"""
-        <div style="
-            display:flex;align-items:center;justify-content:center;
-            margin:8px 0 14px 0;">
-          <div style="
-            max-width:1100px;width:100%;
-            background:#ffffff;border:3px solid #0ea5a6;border-radius:16px;
-            padding:20px 24px;box-shadow:0 8px 28px rgba(0,0,0,0.15);
-            font-size:28px;font-weight:900;color:#0f172a;text-align:center;">
+        <div style="display:flex;align-items:center;justify-content:center;margin:8px 0 14px 0;">
+          <div style="max-width:1100px;width:100%;
+                      background:#ffffff;border:3px solid #0ea5a6;border-radius:16px;
+                      padding:20px 24px;box-shadow:0 8px 28px rgba(0,0,0,0.15);
+                      font-size:28px;font-weight:900;color:#0f172a;text-align:center;">
             {text}
           </div>
         </div>
-        """,
-        unsafe_allow_html=True
+        """, unsafe_allow_html=True
     )
     time.sleep(seconds)
     ALERT.empty()
 
-# ────────── 깜빡임(덧셈 캐리 / 뺄셈 보로우) ──────────
+# ────────── 깜빡임(덧셈/뺄셈 변환) ──────────
 def flash_micros_as_rod(ph):
     time.sleep(CARRY_PAUSE_BEFORE)
     for _ in range(BLINK_CYCLES):
@@ -417,7 +449,6 @@ with tab_add:
         for _ in range(add_B["o"]):
             add_B["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
-        # 완료 효과음
         render_all_add(); play_sound(SND_OK)
 
 # ────────── 뺄셈 ──────────
@@ -462,22 +493,22 @@ with tab_sub:
 
     render_all_sub()
 
-    # 받아내림 헬퍼(메인 말풍선 4초 → 깜빡임 → 자릿값 보충)
+    # 받아내림 헬퍼(문구 수정 완료)
     def borrow_for_k(need):
         if res["k"] >= need: return
-        show_alert(f"{res['k']}에서 {need}을 뺄 수 없어요!<br><b>10을 0.001×10으로 받아내림할게요.</b>")
+        show_alert(f"{res['k']}에서 {need}을 뺄 수 없어요!<br><b>0.01 하나를 0.001 10개로 받아내림할게요.</b>")
         if res["h"] > 0:
             flash_one_rod_to_ten_micros(R_H, R_K)
             res["h"] -= 1; res["k"] += 10
             render_all_sub(label="H"); time.sleep(STEP_DELAY_MOVE); return
         if res["t"] > 0:
-            show_alert("0.1 하나를 0.01 열 개로 바꿔 먼저 내려올게요.")
+            show_alert("0.1 하나를 0.01 10개로 바꿔 먼저 내려올게요.")
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
             render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE)
             borrow_for_k(need); return
         if res["o"] > 0:
-            show_alert("1 하나를 0.1 열 개로 바꿔 먼저 내려올게요.")
+            show_alert("1 하나를 0.1 10개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
             render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
@@ -485,13 +516,13 @@ with tab_sub:
 
     def borrow_for_h(need):
         if res["h"] >= need: return
-        show_alert(f"{res['h']}에서 {need}을 뺄 수 없어요!<br><b>0.1을 0.01×10으로 받아내림할게요.</b>")
+        show_alert(f"{res['h']}에서 {need}을 뺄 수 없어요!<br><b>0.1 하나를 0.01 10개로 받아내림할게요.</b>")
         if res["t"] > 0:
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
             render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE); return
         if res["o"] > 0:
-            show_alert("1 하나를 0.1 열 개로 바꿔 먼저 내려올게요.")
+            show_alert("1 하나를 0.1 10개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
             render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
@@ -499,46 +530,38 @@ with tab_sub:
 
     def borrow_for_t(need):
         if res["t"] >= need: return
-        show_alert(f"{res['t']}에서 {need}을 뺄 수 없어요!<br><b>1을 0.1×10으로 받아내림할게요.</b>")
+        show_alert(f"{res['t']}에서 {need}을 뺄 수 없어요!<br><b>1 하나를 0.1 10개로 받아내림할게요.</b>")
         if res["o"] > 0:
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
             render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); return
 
-    # 실행(뺄셈): A 즉시 일괄 반영 → 자리별 차감 (덜어내는 수도 함께 감소)
+    # 실행(뺄셈): A 즉시 일괄 반영 → 자리별 차감
     if st.button("▶ (뺄셈) 애니메이션 시작", use_container_width=True, key="run_sub"):
-        # A 즉시 결과로(애니메이션 없음)
         res["k"] += sub_A["k"]; sub_A["k"] = 0
         res["h"] += sub_A["h"]; sub_A["h"] = 0
         res["t"] += sub_A["t"]; sub_A["t"] = 0
         res["o"] += sub_A["o"]; sub_A["o"] = 0
         render_all_sub()
 
-        # 0.001 자리
         if sub_B["k"] > 0:
             need = sub_B["k"]
             if res["k"] < need: borrow_for_k(need)
             for _ in range(need):
                 res["k"] -= 1; sub_B["k"] -= 1
                 render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-
-        # 0.01 자리
         if sub_B["h"] > 0:
             need = sub_B["h"]
             if res["h"] < need: borrow_for_h(need)
             for _ in range(need):
                 res["h"] -= 1; sub_B["h"] -= 1
                 render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-
-        # 0.1 자리
         if sub_B["t"] > 0:
             need = sub_B["t"]
             if res["t"] < need: borrow_for_t(need)
             for _ in range(need):
                 res["t"] -= 1; sub_B["t"] -= 1
                 render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-
-        # 1 자리
         if sub_B["o"] > 0:
             need = sub_B["o"]
             for _ in range(need):
@@ -551,10 +574,11 @@ with tab_sub:
 with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송)", expanded=False):
     col1, col2, col3 = st.columns(3)
     with col1:
-      klass = st.selectbox("학급", ["4-사랑","4-기쁨","4-보람","4-행복","기타"], index=0)
+        klass = st.selectbox("학급", ["4-사랑","4-기쁨","4-보람","4-행복","기타"], index=0)
         nickname = st.text_input("닉네임(또는 이름 이니셜)")
     with col2:
-        quest = st.text_area("오늘의 문제/과제(간단히)", height=80, placeholder="예: 1.257 + 0.078에서 받아올림이 언제 일어났나요?")
+        quest = st.text_area("오늘의 문제/과제(간단히)", height=80,
+                             placeholder="예: 1.257 + 0.078에서 받아올림이 언제 일어났나요?")
     with col3:
         st.markdown("**자기평가(각 0–2점)**")
         r1 = st.slider("개념이해", 0, 2, 1)
@@ -567,7 +591,7 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
         if not nickname.strip():
             st.error("닉네임을 입력해 주세요.")
         else:
-            st.session_state["submissions"].append({
+            row = {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "class": klass,
                 "nickname": nickname.strip(),
@@ -576,24 +600,22 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
                 "rubric_2": r2,
                 "rubric_3": r3,
                 "rubric_total": rubric_total,
-            })
+            }
+            add_submission(row)   # ← DB 저장 확정
             st.success("제출 완료! 교사 대시보드에서 확인할 수 있어요.")
+
 # ────────── (교사용) 미니 대시보드 프리뷰 ──────────
 if st.session_state.get("teacher_ok", False):
-    subs = st.session_state.get("submissions", [])
     st.divider()
     st.subheader("📊 교사용 미니 패널 (최근 5건)")
-    if not subs:
-        st.info("아직 제출이 없습니다. 학생이 제출하면 여기에서 최근 5건을 미리 볼 수 있어요. 전체 지표는 pages ▶ 교사 대시보드에서 확인하세요.")
+    cols, rows = fetch_recent(5)
+    if not rows:
+        st.info("아직 제출이 없습니다. 전체 지표는 pages ▶ 교사 대시보드에서 확인하세요.")
     else:
         import pandas as pd
-        df = pd.DataFrame(subs)
-        cols = ["timestamp","class","nickname","quest","rubric_total"]
-        cols = [c for c in cols if c in df.columns]
-        st.dataframe(
-            df[cols].sort_values("timestamp", ascending=False).head(5),
-            use_container_width=True
-        )
+        df = pd.DataFrame(rows, columns=cols)
+        st.dataframe(df, use_container_width=True)
+
 
 
 

@@ -3,7 +3,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from contextlib import closing
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 st.set_page_config(page_title="교사 대시보드", page_icon="📊", layout="wide")
 
@@ -12,12 +12,12 @@ if not st.session_state.get("teacher_ok", False):
     st.error("교사 전용 페이지입니다. 좌측 사이드바에서 '교사' 선택 후 비밀번호를 입력하세요.")
     st.stop()
 
-# --- 30초 자동 새로고침 (교사탭 전용) ---
+# --- 30초 자동 새로고침 ---
 try:
-    from streamlit_autorefresh import st_autorefresh  # requirements에 streamlit-autorefresh 추가 권장
+    from streamlit_autorefresh import st_autorefresh
     st_autorefresh(interval=30_000, key="teacher_dash_autorefresh")
 except Exception:
-    st.caption("⏱ 자동 새로고침을 사용하려면 requirements.txt에 `streamlit-autorefresh`를 추가하세요.")
+    st.caption("⏱ 자동 새로고침을 사용하려면 requirements.txt에 `streamlit-autorefresh>=0.0.2`를 추가하세요.")
 
 # --- DB 유틸 ---
 @st.cache_resource
@@ -39,7 +39,7 @@ def get_conn():
         """)
     return conn
 
-def fetch_all():
+def fetch_all() -> pd.DataFrame:
     conn = get_conn()
     with closing(conn.cursor()) as cur:
         cur.execute("""
@@ -59,16 +59,15 @@ if df.empty:
     st.warning("아직 제출이 없습니다. 학생 화면에서 제출 후 좌측 상단 'Rerun' 또는 새로고침하세요.")
     st.stop()
 
-# --- 전처리(날짜 컬럼) ---
+# 전처리(날짜 컬럼)
 df["dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
 df["date"] = df["dt"].dt.date
 
-# --- 필터 UI ---
+# 필터 UI
 flt = st.container()
 with flt:
     left, mid, right = st.columns([2,2,3])
     with left:
-        # 날짜 범위 기본값: 최근 14일
         max_day = df["date"].max()
         min_day = df["date"].min()
         default_start = max(min_day, (max_day or date.today()) - timedelta(days=14))
@@ -79,7 +78,6 @@ with flt:
         class_options = ["4-사랑","4-기쁨","4-보람","4-행복","기타"]
         sel_classes = st.multiselect("학급(복수 선택)", class_options, default=class_options)
 
-# 날짜/학급 필터 적용
 if start_day > end_day:
     st.error("시작일이 종료일보다 늦을 수 없습니다.")
     st.stop()
@@ -91,7 +89,7 @@ if fdf.empty:
     st.info("선택한 조건에 해당하는 제출이 없습니다. 필터를 조정해 주세요.")
     st.stop()
 
-# --- 상단 지표 ---
+# 상단 지표
 topL, topR = st.columns([2,3])
 with topL:
     st.metric("총 제출", len(fdf))
@@ -108,21 +106,14 @@ with topR:
     )
 
 st.divider()
-
-# --- 그래프 섹션 ---
 st.write("### 루브릭/제출 현황")
 
-# 1) 루브릭 총점 분포
-hist = (fdf["rubric_total"]
-        .value_counts()
+# 그래프 데이터
+hist = (fdf["rubric_total"].value_counts()
         .sort_index()
         .rename_axis("자기평가 총점(0–6)")
         .reset_index(name="학생 수"))
-
-# 2) 날짜별 제출 수
 by_day = fdf.groupby("date").size().rename("제출 수").reset_index()
-
-# 3) 학급별 제출 수
 by_class = fdf["class"].value_counts().rename_axis("학급").reset_index(name="제출 수")
 
 c1, c2, c3 = st.columns(3)
@@ -135,7 +126,9 @@ try:
                 x=alt.X("자기평가 총점(0–6):O", title="자기평가 총점(0–6)"),
                 y=alt.Y("학생 수:Q", title="학생 수"),
                 tooltip=["자기평가 총점(0–6)", "학생 수"]
-            ).properties(height=280), use_container_width=True)
+            ).properties(height=280),
+            use_container_width=True
+        )
     with c2:
         st.write("**날짜별 제출 추이**")
         st.altair_chart(
@@ -143,7 +136,9 @@ try:
                 x=alt.X("date:T", title="날짜"),
                 y=alt.Y("제출 수:Q", title="제출 수"),
                 tooltip=["date:T","제출 수:Q"]
-            ).properties(height=280), use_container_width=True)
+            ).properties(height=280),
+            use_container_width=True
+        )
     with c3:
         st.write("**학급별 제출 수**")
         st.altair_chart(
@@ -151,7 +146,9 @@ try:
                 x=alt.X("학급:N", sort="-y"),
                 y=alt.Y("제출 수:Q"),
                 tooltip=["학급","제출 수"]
-            ).properties(height=280), use_container_width=True)
+            ).properties(height=280),
+            use_container_width=True
+        )
 except Exception:
     with c1:
         st.write("**총점 히스토그램**")
@@ -163,7 +160,8 @@ except Exception:
         st.write("**학급별 제출 수**")
         st.bar_chart(by_class.set_index("학급"))
 
-# --- CSV 다운로드(필터 적용본) ---
+# CSV 다운로드(필터 적용본)
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
 
