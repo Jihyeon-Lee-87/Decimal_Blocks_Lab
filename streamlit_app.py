@@ -23,10 +23,18 @@ def ensure_defaults():
     ss.setdefault("B", 0.078)   # 두번째 수
 ensure_defaults()
 
-# ────────── DB 유틸 (공용 SQLite) ──────────
+# ────────── DB 유틸 (공용 SQLite; 프로젝트 루트 고정 경로) ──────────
+import sqlite3
+from contextlib import closing
+from pathlib import Path
+
+# 프로젝트 루트(이 파일이 있는 폴더)를 기준으로 DB 파일 지정
+ROOT_DIR = Path(__file__).resolve().parent
+DB_PATH  = str(ROOT_DIR / "submissions.db")  # pages/ 등 어디서 접근해도 같은 파일
+
 @st.cache_resource
 def get_conn():
-    conn = sqlite3.connect("submissions.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     with conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS submissions (
@@ -42,6 +50,7 @@ def get_conn():
             )
         """)
     return conn
+
 
 def add_submission(row: dict):
     conn = get_conn()

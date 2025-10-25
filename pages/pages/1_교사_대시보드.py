@@ -4,6 +4,7 @@ import pandas as pd
 import sqlite3
 from contextlib import closing
 from datetime import date, timedelta
+from pathlib import Path
 
 st.set_page_config(page_title="교사 대시보드", page_icon="📊", layout="wide")
 
@@ -19,10 +20,13 @@ try:
 except Exception:
     st.caption("⏱ 자동 새로고침을 사용하려면 requirements.txt에 `streamlit-autorefresh>=0.0.2`를 추가하세요.")
 
-# --- DB 유틸 ---
+# --- DB 유틸 (프로젝트 루트의 같은 파일을 바라보도록 절대경로 고정) ---
+ROOT_DIR = Path(__file__).resolve().parents[1]  # 프로젝트 루트
+DB_PATH  = str(ROOT_DIR / "submissions.db")
+
 @st.cache_resource
 def get_conn():
-    conn = sqlite3.connect("submissions.db", check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     with conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS submissions (
@@ -48,11 +52,14 @@ def fetch_all() -> pd.DataFrame:
             FROM submissions
             ORDER BY datetime(timestamp) DESC
         """)
-        cols = ["timestamp","class","nickname","quest","rubric_1","rubric_2","rubric_3","rubric_total"]
+        cols = ["timestamp","class","nickname","quest",
+                "rubric_1","rubric_2","rubric_3","rubric_total"]
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
 
 st.title("📊 교사 대시보드")
+# 진단용: 필요시 경로 노출(확인 후 주석/삭제 가능)
+# st.caption(f"DB 파일 경로: {DB_PATH}")
 
 df = fetch_all()
 if df.empty:
@@ -71,9 +78,11 @@ with flt:
         max_day = df["date"].max()
         min_day = df["date"].min()
         default_start = max(min_day, (max_day or date.today()) - timedelta(days=14))
-        start_day = st.date_input("시작일", value=default_start, min_value=min_day, max_value=max_day or date.today())
+        start_day = st.date_input("시작일", value=default_start,
+                                  min_value=min_day, max_value=max_day or date.today())
     with mid:
-        end_day = st.date_input("종료일", value=max_day or date.today(), min_value=min_day, max_value=max_day or date.today())
+        end_day = st.date_input("종료일", value=max_day or date.today(),
+                                min_value=min_day, max_value=max_day or date.today())
     with right:
         class_options = ["4-사랑","4-기쁨","4-보람","4-행복","기타"]
         sel_classes = st.multiselect("학급(복수 선택)", class_options, default=class_options)
@@ -163,5 +172,6 @@ except Exception:
 # CSV 다운로드(필터 적용본)
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
 
 
