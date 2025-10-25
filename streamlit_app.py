@@ -13,6 +13,10 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import streamlit as st
+# 파일 상단 import에 추가
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 
 # ────────── 세션 기본값 ──────────
 def ensure_defaults():
@@ -601,7 +605,7 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
             st.error("닉네임을 입력해 주세요.")
         else:
             row = {
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S"),
                 "class": klass,
                 "nickname": nickname.strip(),
                 "quest": quest.strip(),
