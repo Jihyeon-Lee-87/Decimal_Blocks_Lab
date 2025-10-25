@@ -1,47 +1,50 @@
 # -*- coding: utf-8 -*-
-# Decimal Blocks 3D — Add/Sub up to Thousandths + DB + 교사 인증 배지/미니패널
+# Decimal Blocks 3D — Add/Sub up to Thousandths + Guess Rules + Teacher Mini Panel (filters & detail)
 # - 덧셈: 하나씩 이동 + 받아올림 강조, 완료 시 효과음
-# - 뺄셈: 시작 시 A를 결과판에 '즉시' 반영 → 자리별 차감(받아내림 강조, 문구 수정)
-# - 제출: SQLite DB에 기록 → 교사 대시보드/미니패널에서 공용 조회
-# - 사이드바: 역할/교사 인증(+학생 전환 시 인증 해제) + 수 입력 + 소리 버튼
-# - 하단: 학생 제출 폼(학급: 4-사랑/4-기쁨/4-보람/4-행복/기타)
+# - 뺄셈: 시작 시 A를 결과판으로 즉시 반영 → 자리별 차감(받아내림 강조)
+# - 정답 맞혀보기: 정답이면 레벨↑(누적), 오답 연속 시 힌트 강화(1~3단계)
+# - 제출: SQLite DB에 KST(Asia/Seoul) 타임스탬프로 기록 + guess_* 메타데이터 저장
+# - (교사용) 미니 대시보드: 날짜·학급 필터, 최근 제출 표(합/차/정답여부 한글), 행 선택 상세보기, CSV 저장
 
 import os, base64, time, sqlite3
 from contextlib import closing
 from typing import Optional, Tuple
+from pathlib import Path
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
+
 import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import pandas as pd
 import streamlit as st
-# 파일 상단 import에 추가
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 
 # ────────── 세션 기본값 ──────────
 def ensure_defaults():
     ss = st.session_state
-    ss.setdefault("submissions", [])  # (과거 세션용 잔존, 현재는 DB 사용)
     ss.setdefault("teacher_ok", False)
-    ss.setdefault("A", 1.257)   # 첫번째 수
-    ss.setdefault("B", 0.078)   # 두번째 수
+    ss.setdefault("A", 1.257)               # 첫번째 수
+    ss.setdefault("B", 0.078)               # 두번째 수
+    ss.setdefault("level", 0)               # 누적 레벨
+    ss.setdefault("wrong_streak_add", 0)    # 덧셈 오답 연속
+    ss.setdefault("wrong_streak_sub", 0)    # 뺄셈 오답 연속
+    # 최근 정답 시도(제출 시 DB에 저장)
+    ss.setdefault("last_guess_mode", None)
+    ss.setdefault("last_guess_value", None)
+    ss.setdefault("last_guess_correct", None)
+    ss.setdefault("last_correct_answer", None)
 ensure_defaults()
 
-# ────────── DB 유틸 (공용 SQLite; 프로젝트 루트 고정 경로) ──────────
-import sqlite3
-from contextlib import closing
-from pathlib import Path
-
-# 프로젝트 루트(이 파일이 있는 폴더)를 기준으로 DB 파일 지정
+# ────────── DB (공용 SQLite; 루트 고정 경로) ──────────
 ROOT_DIR = Path(__file__).resolve().parent
-DB_PATH  = str(ROOT_DIR / "submissions.db")  # pages/ 등 어디서 접근해도 같은 파일
+DB_PATH  = str(ROOT_DIR / "submissions.db")
 
 @st.cache_resource
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     with conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS submissions (
+            CREATE TABLE IF NOT EXISTS submissions(
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT,
                 class TEXT,
@@ -55,31 +58,51 @@ def get_conn():
         """)
     return conn
 
+def ensure_guess_columns():
+    conn = get_conn()
+    with conn:
+        for col, ddl in [
+            ("guess_mode",      "TEXT"),
+            ("guess_value",     "TEXT"),
+            ("guess_correct",   "INTEGER"),
+            ("correct_answer",  "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE submissions ADD COLUMN {col} {ddl}")
+            except Exception:
+                pass
+ensure_guess_columns()
 
 def add_submission(row: dict):
     conn = get_conn()
     with conn:
         conn.execute("""
             INSERT INTO submissions
-            (timestamp, class, nickname, quest, rubric_1, rubric_2, rubric_3, rubric_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (timestamp, class, nickname, quest, rubric_1, rubric_2, rubric_3, rubric_total,
+             guess_mode, guess_value, guess_correct, correct_answer)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            row["timestamp"], row["class"], row["nickname"], row["quest"],
-            row["rubric_1"], row["rubric_2"], row["rubric_3"], row["rubric_total"]
+            row.get("timestamp"), row.get("class"), row.get("nickname"), row.get("quest"),
+            row.get("rubric_1"), row.get("rubric_2"), row.get("rubric_3"), row.get("rubric_total"),
+            row.get("guess_mode"), row.get("guess_value"), row.get("guess_correct"), row.get("correct_answer"),
         ))
 
-def fetch_recent(n=5):
+def fetch_recent(limit=1000, start=None, end=None, classes=None) -> pd.DataFrame:
+    """필터 가능한 조회(미니 패널에서 사용)."""
     conn = get_conn()
-    with closing(conn.cursor()) as cur:
-        cur.execute("""
-            SELECT timestamp, class, nickname, quest, rubric_total
-            FROM submissions
-            ORDER BY datetime(timestamp) DESC
-            LIMIT ?
-        """, (n,))
-        cols = ["timestamp","class","nickname","quest","rubric_total"]
-        rows = cur.fetchall()
-    return cols, rows
+    q = """SELECT id, timestamp, class, nickname, quest,
+                  rubric_1, rubric_2, rubric_3, rubric_total,
+                  guess_mode, guess_value, guess_correct, correct_answer
+           FROM submissions"""
+    df = pd.read_sql_query(q, conn)
+    if df.empty:
+        return df
+    df["dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["date"] = df["dt"].dt.date
+    if start: df = df[df["date"] >= start]
+    if end:   df = df[df["date"] <= end]
+    if classes: df = df[df["class"].isin(classes)]
+    return df.sort_values("dt", ascending=False).head(limit).reset_index(drop=True)
 
 # ────────── 글꼴/스타일 ──────────
 matplotlib.rcParams["font.family"] = [
@@ -88,14 +111,13 @@ matplotlib.rcParams["font.family"] = [
 ]
 matplotlib.rcParams["font.size"] = 13
 
-# ────────── 페이지 ──────────
 st.set_page_config(
     page_title="Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈",
     page_icon="🔢",
     layout="wide"
 )
 st.markdown("<h1 style='margin:0'>Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈</h1>", unsafe_allow_html=True)
-st.markdown("<div style='font-size:16px;color:#334155;margin:6px 0 14px 0'>원하는 두 수를 입력하고 각 탭의 <b>애니메이션 시작</b> 버튼을 눌러보세요.</div>", unsafe_allow_html=True)
+st.markdown("<div style='font-size:16px;color:#334155;margin:6px 0 14px 0'>원하는 두 수를 입력하고 각 탭의 <b>정답 맞혀보기</b> 또는 <b>애니메이션 시작</b> 버튼을 눌러보세요.</div>", unsafe_allow_html=True)
 
 # ────────── 색/타이밍 ──────────
 COLOR_ONES   = (0.20, 0.48, 0.78, 1.0)   # 1 (큐브)
@@ -104,12 +126,12 @@ COLOR_HUNDS  = (0.98, 0.52, 0.18, 1.0)   # 0.01 (막대)
 COLOR_THOUS  = (0.60, 0.40, 0.80, 1.0)   # 0.001 (작은 큐브)
 COLOR_FLASH  = (1.00, 1.00, 0.10, 1.0)   # 형광노랑
 
-STEP_DELAY_MOVE     = 0.30     # 블록 1개 이동/차감 간격
+STEP_DELAY_MOVE     = 0.30
 BLINK_CYCLES        = 2
 BLINK_INTERVAL      = 0.60
 CARRY_PAUSE_BEFORE  = 0.70
 CARRY_PAUSE_AFTER   = 0.70
-ALERT_SECONDS       = 4.0      # 메인 말풍선 표시시간
+ALERT_SECONDS       = 4.0
 
 # ────────── 숫자 분해 ──────────
 def split_digits(x: float):
@@ -225,7 +247,7 @@ with st.sidebar:
 
     role = st.radio("역할", ["학생", "교사"], horizontal=True, key="role_sel")
     if role == "학생":
-        st.session_state["teacher_ok"] = False  # 학생으로 전환 시 인증 풀기
+        st.session_state["teacher_ok"] = False
     if role == "교사":
         pw = st.text_input("교사 비밀번호", type="password", help="관리자가 정한 비밀번호를 입력하세요.")
         teacher_pw = os.environ.get("TEACHER_PW", "teacher")
@@ -243,13 +265,13 @@ with st.sidebar:
     st.number_input("두번째 수 (0.000~9.999)", min_value=0.000, max_value=9.999,
                     value=float(st.session_state.get("B", 0.078)),
                     step=0.001, format="%.3f", key="B")
+    st.caption("팁: 애니메이션 전에 ‘정답 맞혀보기’를 눌러보세요. 맞으면 풍선+효과음!")
 
     st.divider()
     if st.button("🔊 소리 켜기"):
         play_sound(SND_OK)
         st.success("소리 사용이 허용되었습니다.")
 
-# 교사 인증 배지/안내
 if st.session_state.get("teacher_ok", False):
     st.markdown(
         """
@@ -368,10 +390,10 @@ def render_panel(ph, count, kind: str, label=None):
         draw_micros(ax, count, COLOR_THOUS)
     ph.pyplot(fig, True); plt.close(fig)
 
-# ────────── 탭 ──────────
+# ────────── 덧셈/뺄셈 탭 ──────────
 tab_add, tab_sub = st.tabs(["➕ 덧셈", "➖ 뺄셈"])
 
-# ────────── 덧셈 ──────────
+# ===== 덧셈 =====
 with tab_add:
     row_top = st.columns(2, gap="large")
     row_bot = st.columns(1)
@@ -413,7 +435,64 @@ with tab_add:
 
     render_all_add()
 
+    # --- 정답 맞혀보기 (덧셈) ---
+    st.markdown("#### 🧠 정답 맞혀보기 (덧셈)")
+    colg1, colg2 = st.columns([2,1])
+    with colg1:
+        user_guess_add = st.text_input("두 수의 합을 예상해 입력해 보세요(예: 2.035)", key="guess_add")
+    with colg2:
+        if st.button("정답 확인(덧셈)", key="check_add"):
+            try:
+                correct_add = round(float(st.session_state["A"]) + float(st.session_state["B"]), 3)
+                guess_val = round(float(user_guess_add), 3)
+                if guess_val == correct_add:
+                    st.success("정답이에요! 🎉")
+                    st.balloons(); play_sound(SND_OK)
+                    st.session_state["level"] = st.session_state.get("level", 0) + 1
+                    st.toast(f"레벨 {st.session_state['level']} 달성!", icon="🎈")
+                    st.session_state["wrong_streak_add"] = 0
+                    st.session_state["last_guess_mode"] = "add"
+                    st.session_state["last_guess_value"] = f"{guess_val:.3f}"
+                    st.session_state["last_guess_correct"] = 1
+                    st.session_state["last_correct_answer"] = f"{correct_add:.3f}"
+                else:
+                    play_sound(SND_WRONG)
+                    st.error("아쉬워요! ❌")
+                    ws = st.session_state.get("wrong_streak_add", 0) + 1
+                    st.session_state["wrong_streak_add"] = ws
+                    A_o,A_t,A_h,A_k = split_digits(st.session_state["A"])
+                    B_o,B_t,B_h,B_k = split_digits(st.session_state["B"])
+                    hints = []
+                    # 1단계: 받아올림 발생 자리
+                    carry_k = 1 if (A_k+B_k)>=10 else 0
+                    carry_h = 1 if (A_h+B_h+carry_k)>=10 else 0
+                    carry_t = 1 if (A_t+B_t+carry_h)>=10 else 0
+                    if ws >= 1:
+                        step1 = []
+                        if carry_k: step1.append("소수 셋째 자리에서 받아올림이 생겨요.")
+                        if carry_h: step1.append("소수 둘째 자리에서도 받아올림이 생겨요.")
+                        if carry_t: step1.append("소수 첫째 자리에서도 받아올림이 생겨요.")
+                        if step1: hints.append("<br>".join(step1))
+                    # 2단계: 자리별 부분합 수치
+                    if ws >= 2:
+                        k_sum = A_k + B_k
+                        h_sum = A_h + B_h + (1 if k_sum>=10 else 0)
+                        t_sum = A_t + B_t + (1 if h_sum>=10 else 0)
+                        hints.append(f"부분합 힌트: 0.001자리={k_sum}, 0.01자리={h_sum}, 0.1자리={t_sum}")
+                    # 3단계: 형식 힌트
+                    if ws >= 3:
+                        hints.append("정답 형식 힌트: 합은 소수 셋째 자리까지 표기(예: a.bcdef → a.bcd).")
+                    show_alert("<br>".join(hints) if hints else "자릿값을 다시 생각해 보세요!", seconds=3.5)
+                    st.session_state["last_guess_mode"] = "add"
+                    st.session_state["last_guess_value"] = f"{guess_val:.3f}"
+                    st.session_state["last_guess_correct"] = 0
+                    st.session_state["last_correct_answer"] = f"{correct_add:.3f}"
+            except Exception:
+                st.warning("숫자 형식으로 입력해 주세요. 예: 2.035")
+
+    # --- (덧셈) 애니메이션 버튼 ---
     if st.button("▶ (덧셈) 애니메이션 시작", use_container_width=True, key="run_add"):
+        # 결과판으로 하나씩 이동
         # 0.001
         for _ in range(add_A["k"]):
             add_A["k"] -= 1; add_R["k"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
@@ -427,7 +506,6 @@ with tab_add:
                 show_alert("0.001이 10개 모여 0.01이 됐어요.<br><b>소수 둘째 자리로 1 받아올림할게요.</b>")
                 flash_micros_as_rod(R_K)
                 add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE)
-
         # 0.01
         for _ in range(add_A["h"]):
             add_A["h"] -= 1; add_R["h"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
@@ -441,7 +519,6 @@ with tab_add:
                 show_alert("0.01이 10개 모여 0.1이 됐어요.<br><b>소수 첫째 자리로 1 받아올림할게요.</b>")
                 flash_rods_as_plate(R_H)
                 add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE)
-
         # 0.1
         for _ in range(add_A["t"]):
             add_A["t"] -= 1; add_R["t"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
@@ -455,7 +532,6 @@ with tab_add:
                 show_alert("0.1이 10개 모여 1이 됐어요.<br><b>일의 자리로 1 받아올림할게요.</b>")
                 flash_plates_as_cube(R_T, R_O, add_R["o"])
                 add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE)
-
         # 1
         for _ in range(add_A["o"]):
             add_A["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
@@ -464,7 +540,7 @@ with tab_add:
 
         render_all_add(); play_sound(SND_OK)
 
-# ────────── 뺄셈 ──────────
+# ===== 뺄셈 =====
 with tab_sub:
     row_top = st.columns(2, gap="large")
     row_bot = st.columns(1)
@@ -472,9 +548,9 @@ with tab_sub:
     A0_o, A0_t, A0_h, A0_k = split_digits(st.session_state["A"])
     B0_o, B0_t, B0_h, B0_k = split_digits(st.session_state["B"])
 
-    sub_A = {"o":A0_o, "t":A0_t, "h":A0_h, "k":A0_k}  # 표시용(원래 수)
-    sub_B = {"o":B0_o, "t":B0_t, "h":B0_h, "k":B0_k}  # 표시용(덜어내는 수)
-    res   = {"o":0,     "t":0,     "h":0,     "k":0}  # 결과판 상태
+    sub_A = {"o":A0_o, "t":A0_t, "h":A0_h, "k":A0_k}  # 원래 수(표시)
+    sub_B = {"o":B0_o, "t":B0_t, "h":B0_h, "k":B0_k}  # 덜어내는 수(표시)
+    res   = {"o":0,     "t":0,     "h":0,     "k":0}  # 결과판
 
     A_nums, (F_O, F_T, F_H, F_K) = number_row(row_top[0], sub_A["o"], sub_A["t"], sub_A["h"], sub_A["k"], "첫번째 수(원래 수)")
     B_nums, (S_O, S_T, S_H, S_K) = number_row(row_top[1], sub_B["o"], sub_B["t"], sub_B["h"], sub_B["k"], "두번째 수(덜어내는 수)")
@@ -506,7 +582,7 @@ with tab_sub:
 
     render_all_sub()
 
-    # 받아내림 헬퍼(문구 수정 완료)
+    # 받아내림 헬퍼
     def borrow_for_k(need):
         if res["k"] >= need: return
         show_alert(f"{res['k']}에서 {need}을 뺄 수 없어요!<br><b>0.01 하나를 0.001 10개로 받아내림할게요.</b>")
@@ -549,7 +625,56 @@ with tab_sub:
             res["o"] -= 1; res["t"] += 10
             render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); return
 
-    # 실행(뺄셈): A 즉시 일괄 반영 → 자리별 차감
+    # --- 정답 맞혀보기 (뺄셈) ---
+    st.markdown("#### 🧠 정답 맞혀보기 (뺄셈)")
+    colg1s, colg2s = st.columns([2,1])
+    with colg1s:
+        user_guess_sub = st.text_input("두 수의 차를 예상해 입력해 보세요(예: 0.479)", key="guess_sub")
+    with colg2s:
+        if st.button("정답 확인(뺄셈)", key="check_sub"):
+            try:
+                correct_sub = round(float(st.session_state["A"]) - float(st.session_state["B"]), 3)
+                guess_val = round(float(user_guess_sub), 3)
+                if guess_val == correct_sub:
+                    st.success("정답이에요! 🎉")
+                    st.balloons(); play_sound(SND_OK)
+                    st.session_state["level"] = st.session_state.get("level", 0) + 1
+                    st.toast(f"레벨 {st.session_state['level']} 달성!", icon="🎈")
+                    st.session_state["wrong_streak_sub"] = 0
+                    st.session_state["last_guess_mode"] = "sub"
+                    st.session_state["last_guess_value"] = f"{guess_val:.3f}"
+                    st.session_state["last_guess_correct"] = 1
+                    st.session_state["last_correct_answer"] = f"{correct_sub:.3f}"
+                else:
+                    play_sound(SND_WRONG)
+                    st.error("아쉬워요! ❌")
+                    ws = st.session_state.get("wrong_streak_sub", 0) + 1
+                    st.session_state["wrong_streak_sub"] = ws
+                    A_o,A_t,A_h,A_k = split_digits(st.session_state["A"])
+                    B_o,B_t,B_h,B_k = split_digits(st.session_state["B"])
+                    hints = []
+                    need_k = A_k < B_k
+                    need_h = (A_h - (1 if need_k else 0)) < B_h
+                    need_t = (A_t - (1 if (need_h or (A_h==B_h and need_k)) else 0)) < B_t
+                    if ws >= 1:
+                        step1 = []
+                        if need_k: step1.append("소수 셋째 자리에서 받아내림이 필요해요.")
+                        if need_h: step1.append("소수 둘째 자리에서도 받아내림이 필요해요.")
+                        if need_t: step1.append("소수 첫째 자리에서도 받아내림이 필요해요.")
+                        if step1: hints.append("<br>".join(step1))
+                    if ws >= 2:
+                        hints.append(f"자리 비교: 0.001자리 {A_k} vs {B_k}, 0.01자리 {A_h} vs {B_h}, 0.1자리 {A_t} vs {B_t}")
+                    if ws >= 3:
+                        hints.append("정답 형식 힌트: 차는 소수 셋째 자리까지 표기(예: 0.abc). 받아내림이 있으면 앞자리에서 1을 빌려와요.")
+                    show_alert("<br>".join(hints) if hints else "자릿값을 다시 생각해 보세요!", seconds=3.5)
+                    st.session_state["last_guess_mode"] = "sub"
+                    st.session_state["last_guess_value"] = f"{guess_val:.3f}"
+                    st.session_state["last_guess_correct"] = 0
+                    st.session_state["last_correct_answer"] = f"{correct_sub:.3f}"
+            except Exception:
+                st.warning("숫자 형식으로 입력해 주세요. 예: 0.479")
+
+    # --- (뺄셈) 애니메이션: A를 결과로 즉시 옮긴 후 차감 시작 ---
     if st.button("▶ (뺄셈) 애니메이션 시작", use_container_width=True, key="run_sub"):
         res["k"] += sub_A["k"]; sub_A["k"] = 0
         res["h"] += sub_A["h"]; sub_A["h"] = 0
@@ -604,8 +729,9 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
         if not nickname.strip():
             st.error("닉네임을 입력해 주세요.")
         else:
+            ts_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
             row = {
-                "timestamp": datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": ts_kst,
                 "class": klass,
                 "nickname": nickname.strip(),
                 "quest": quest.strip(),
@@ -613,21 +739,72 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
                 "rubric_2": r2,
                 "rubric_3": r3,
                 "rubric_total": rubric_total,
+                # 정답 시도 메타데이터(학생 화면엔 미노출)
+                "guess_mode":     st.session_state.get("last_guess_mode"),
+                "guess_value":    st.session_state.get("last_guess_value"),
+                "guess_correct":  st.session_state.get("last_guess_correct"),
+                "correct_answer": st.session_state.get("last_correct_answer"),
             }
-            add_submission(row)   # ← DB 저장 확정
+            add_submission(row)
             st.success("제출 완료! 교사 대시보드에서 확인할 수 있어요.")
+            # 제출 후 최근 시도값 초기화(선택)
+            st.session_state["last_guess_mode"] = None
+            st.session_state["last_guess_value"] = None
+            st.session_state["last_guess_correct"] = None
+            st.session_state["last_correct_answer"] = None
 
-# ────────── (교사용) 미니 대시보드 프리뷰 ──────────
+# ────────── (교사용) 미니 대시보드 — 필터/상세보기/CSV ──────────
 if st.session_state.get("teacher_ok", False):
     st.divider()
-    st.subheader("📊 교사용 미니 패널 (최근 5건)")
-    cols, rows = fetch_recent(5)
-    if not rows:
-        st.info("아직 제출이 없습니다. 전체 지표는 pages ▶ 교사 대시보드에서 확인하세요.")
+    st.subheader("📊 교사용 미니 패널")
+
+    # 필터 UI
+    filtL, filtM, filtR = st.columns([2,2,3])
+    with filtL:
+        # 기본 14일 범위
+        today = date.today()
+        start_def = today - timedelta(days=14)
+        start_day = st.date_input("시작일", value=start_def, key="minip_start")
+    with filtM:
+        end_day = st.date_input("종료일", value=today, key="minip_end")
+    with filtR:
+        class_opts = ["4-사랑","4-기쁨","4-보람","4-행복","기타"]
+        sel_classes = st.multiselect("학급(복수 선택)", class_opts, default=class_opts, key="minip_cls")
+
+    df = fetch_recent(limit=1000, start=start_day, end=end_day, classes=sel_classes)
+
+    if df.empty:
+        st.info("선택한 조건에 해당하는 제출이 없습니다.")
     else:
-        import pandas as pd
-        df = pd.DataFrame(rows, columns=cols)
-        st.dataframe(df, use_container_width=True)
+        # 보기 좋은 표
+        df_disp = df.copy()
+        df_disp["정답 유형"] = df_disp["guess_mode"].map({"add":"합","sub":"차"}).fillna("-")
+        df_disp["정답여부"] = pd.to_numeric(df_disp["guess_correct"], errors="coerce").map({1:"정답",0:"오답"}).fillna("-")
+        show_cols = ["timestamp","class","nickname","quest","정답 유형","guess_value","정답여부","correct_answer","rubric_total"]
+        show_cols = [c for c in show_cols if c in df_disp.columns]
+
+        st.dataframe(df_disp[show_cols], use_container_width=True)
+
+        # 상세보기: 타임스탬프/닉네임으로 선택
+        pickL, pickR = st.columns([2,3])
+        with pickL:
+            options = df.apply(lambda r: f"{r['timestamp']} · {r['class']} · {r['nickname']}", axis=1).tolist()
+            sel = st.selectbox("상세보기 선택", options, index=0)
+        with pickR:
+            row = df.iloc[options.index(sel)]
+            st.markdown("#### 상세")
+            st.write(f"**시각**: {row['timestamp']}  |  **학급**: {row['class']}  |  **닉네임**: {row['nickname']}")
+            st.write(f"**문항 요약**: {row.get('quest','')}")
+            st.write(f"**자기평가 총점**: {int(row.get('rubric_total',0))}")
+            gm = {"add":"합","sub":"차"}.get(row.get("guess_mode"), "-")
+            gc = {1:"정답",0:"오답"}.get(pd.to_numeric(row.get("guess_correct"), errors="coerce"), "-")
+            st.write(f"**정답 유형**: {gm}  |  **학생 입력값**: {row.get('guess_value','-')}  |  **정답여부**: {gc}  |  **정답**: {row.get('correct_answer','-')}")
+
+        # CSV 다운(필터 적용)
+        csv = df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_mini_filtered.csv", mime="text/csv")
+
+
 
 
 
