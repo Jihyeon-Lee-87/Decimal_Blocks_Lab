@@ -1,50 +1,48 @@
 # -*- coding: utf-8 -*-
 # Decimal Blocks 3D — Add/Sub up to Thousandths
-# (내장 효과음 전용, 사운드 상태표시 제거, 소리 프라임 버튼, 또렷한 깜빡임, 올바른 받아올림/받아내림)
+# - 덧셈: 10개 도달 시 메인 큰 말풍선(7초) → 깜빡임 → 상위 자리로 올림, 완료시 효과음
+# - 뺄셈: 시작 시 A를 결과판에 즉시 반영(애니메이션 없음) → 자리별 차감은 하나씩,
+#        필요 시 메인 큰 말풍선(7초) → 깜빡임 → 받아내림 → 계속 차감
+# - 뺄셈 차감 중 ‘덜어내는 수’도 동시에 1씩 줄어 1:1 대응이 보이도록
 
-import os, base64, time, math
+import os, base64, time
 from typing import Optional, Tuple
 import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import streamlit as st
 
-# ────────── 안전한 폰트 ──────────
+# ────────── 글꼴 ──────────
 matplotlib.rcParams["font.family"] = [
     "Noto Sans CJK KR", "NanumGothic", "Apple SD Gothic Neo",
     "Malgun Gothic", "DejaVu Sans"
 ]
 matplotlib.rcParams["font.size"] = 13
 
-# ────────── 페이지 설정 ──────────
+# ────────── 페이지 ──────────
 st.set_page_config(
     page_title="Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈",
     page_icon="🔢",
     layout="wide"
 )
-st.markdown(
-    "<h1 style='margin:0'>Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈</h1>",
-    unsafe_allow_html=True,
-)
-st.markdown(
-    "<div style='font-size:16px;color:#334155;margin:6px 0 14px 0'>원하는 두 수를 입력하고 각 탭의 <b>애니메이션 시작</b> 버튼을 눌러보세요.</div>",
-    unsafe_allow_html=True,
-)
+st.markdown("<h1 style='margin:0'>Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈</h1>", unsafe_allow_html=True)
+st.markdown("<div style='font-size:16px;color:#334155;margin:6px 0 14px 0'>원하는 두 수를 입력하고 각 탭의 <b>애니메이션 시작</b> 버튼을 눌러보세요.</div>", unsafe_allow_html=True)
 
-# ────────── 색/타이밍(깜빡임 더 또렷하게) ──────────
+# ────────── 색/타이밍 ──────────
 COLOR_ONES   = (0.20, 0.48, 0.78, 1.0)   # 1 (큐브)
 COLOR_TENTHS = (0.46, 0.68, 0.22, 1.0)   # 0.1 (판)
 COLOR_HUNDS  = (0.98, 0.52, 0.18, 1.0)   # 0.01 (막대)
 COLOR_THOUS  = (0.60, 0.40, 0.80, 1.0)   # 0.001 (작은 큐브)
-COLOR_FLASH  = (1.00, 1.00, 0.10, 1.0)   # 형광노랑 강조
+COLOR_FLASH  = (1.00, 1.00, 0.10, 1.0)   # 형광노랑
 
-STEP_DELAY_MOVE     = 0.30   # 블록 1개 이동 간격(항상 일정)
+STEP_DELAY_MOVE     = 0.30     # 블록 1개 이동/차감 간격
 BLINK_CYCLES        = 2
-BLINK_INTERVAL      = 0.60   # 깜빡임 간격 ↑
-CARRY_PAUSE_BEFORE  = 0.70   # 변환 전 정지
-CARRY_PAUSE_AFTER   = 0.70   # 변환 후 정지
+BLINK_INTERVAL      = 0.60
+CARRY_PAUSE_BEFORE  = 0.70
+CARRY_PAUSE_AFTER   = 0.70
+ALERT_SECONDS       = 7.0      # 메인 말풍선 표시 시간
 
-# ────────── 숫자 분해: 반올림 없이 셋째 자리까지 ──────────
+# ────────── 숫자 분해 ──────────
 def split_digits(x: float):
     s = f"{float(x):.3f}"
     left, right = s.split(".")
@@ -88,7 +86,7 @@ def scene_axes():
     except: pass
     return fig, ax
 
-# ────────── 크기/간격(연동) ──────────
+# ────────── 크기/간격 ──────────
 GAP_MICRO_X = 0.10
 GAP_ROD_X   = 0.10
 GAP_PLATE_Z = 0.10
@@ -96,10 +94,10 @@ GAP_PLATE_Z = 0.10
 S = 1.0 + 9*GAP_ROD_X
 PLATE_THICK = max((S - 9*GAP_PLATE_Z)/10.0, 0.001)
 
-SIZE_MICRO = (0.1, 0.1, 0.1)      # 0.001
-SIZE_ROD   = (0.1, S, 0.1)        # 0.01 (세워놓은 10개의 0.001)
-SIZE_PLATE = (S, S, PLATE_THICK)  # 0.1 (10개의 0.01이 쌓여 판)
-SIZE_CUBE  = (S, S, S)            # 1   (10개의 0.1이 쌓여 큐브)
+SIZE_MICRO = (0.1, 0.1, 0.1)
+SIZE_ROD   = (0.1, S, 0.1)
+SIZE_PLATE = (S, S, PLATE_THICK)
+SIZE_CUBE  = (S, S, S)
 
 def draw_micros(ax, n, color, gap_x=GAP_MICRO_X):
     dx, dy, dz = SIZE_MICRO
@@ -121,7 +119,7 @@ def draw_cubes(ax, n, color, cols=2, gap=None):
         r, c = divmod(i, cols)
         add_block(ax, (c*(SIZE_CUBE[0]+gap), r*(SIZE_CUBE[1]+gap), 0), SIZE_CUBE, color)
 
-# ────────── 사운드(내장 파일 전용, 상태표시 제거) ──────────
+# ────────── 사운드 ──────────
 def load_bytes(path: str) -> Optional[bytes]:
     try:
         with open(path, "rb") as f:
@@ -144,7 +142,6 @@ def play_sound(t: Optional[Tuple[bytes,str]]):
     if not t: return
     data, mime = t
     b64 = base64.b64encode(data).decode()
-    # 같은 위치에서 연속 재생 보장용: 매번 신규 id를 써서 브라우저가 새 <audio>로 인식하게
     uid = str(time.time()).replace('.','')
     st.markdown(
         f"""<audio id="aud{uid}" autoplay style="display:none">
@@ -153,7 +150,7 @@ def play_sound(t: Optional[Tuple[bytes,str]]):
         unsafe_allow_html=True
     )
 
-# ────────── 사이드바(공통): 문제 설정 + 소리 프라임 ──────────
+# ────────── 사이드바 ──────────
 with st.sidebar:
     st.markdown("### 문제 설정")
     if "A" not in st.session_state: st.session_state["A"] = 1.257
@@ -163,12 +160,33 @@ with st.sidebar:
     st.number_input("두번째 수 (0.000~9.999)", 0.000, 9.999, value=float(st.session_state["B"]),
                     step=0.001, format="%.3f", key="B")
 
-    # 소리 프라임 버튼 (브라우저 자동재생 해제용)
     if st.button("🔊 소리 켜기"):
         play_sound(SND_OK)
         st.success("소리 사용이 허용되었습니다.")
 
-# ────────── 깜빡임(2회) ──────────
+# ────────── 메인 말풍선(큰 알림) ──────────
+ALERT = st.empty()
+def show_alert(text: str, seconds: float = ALERT_SECONDS):
+    ALERT.markdown(
+        f"""
+        <div style="
+            display:flex;align-items:center;justify-content:center;
+            margin:8px 0 14px 0;">
+          <div style="
+            max-width:1100px;width:100%;
+            background:#ffffff;border:3px solid #0ea5a6;border-radius:16px;
+            padding:20px 24px;box-shadow:0 8px 28px rgba(0,0,0,0.15);
+            font-size:28px;font-weight:900;color:#0f172a;text-align:center;">
+            {text}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    time.sleep(seconds)
+    ALERT.empty()
+
+# ────────── 깜빡임 ──────────
 def flash_micros_as_rod(ph):
     time.sleep(CARRY_PAUSE_BEFORE)
     for _ in range(BLINK_CYCLES):
@@ -193,7 +211,7 @@ def flash_plates_as_cube(ph_T, ph_O, o_now):
         fig, ax = scene_axes(); draw_cubes(ax, o_now,   COLOR_ONES ); ph_O.pyplot(fig, True); plt.close(fig); time.sleep(0.25)
     time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
 
-# (뺄셈용) 받아내림 깜빡임
+# (뺄셈) 받아내림 깜빡임
 def flash_one_rod_to_ten_micros(ph_source_H, ph_dest_K):
     time.sleep(CARRY_PAUSE_BEFORE)
     for _ in range(BLINK_CYCLES):
@@ -226,10 +244,7 @@ def flash_one_cube_to_ten_plates(ph_source_O, ph_dest_T, t_now):
 
 # ────────── 공용 UI ──────────
 def number_row(parent_col, o, t, h, k, title):
-    parent_col.markdown(
-        f"<div style='text-align:center;font-size:20px;font-weight:900;margin-bottom:4px;'>{title}</div>",
-        unsafe_allow_html=True
-    )
+    parent_col.markdown(f"<div style='text-align:center;font-size:20px;font-weight:900;margin-bottom:4px;'>{title}</div>", unsafe_allow_html=True)
     c1, cdot, c2, c3, c4 = parent_col.columns([1, 0.10, 1, 1, 1], gap="small")
     o_ph = c1.empty(); t_ph = c2.empty(); h_ph = c3.empty(); k_ph = c4.empty()
     cdot.markdown("<div style='text-align:center;font-size:44px;font-weight:1000;line-height:1;'>·</div>", unsafe_allow_html=True)
@@ -263,25 +278,9 @@ tab_add, tab_sub = st.tabs(["➕ 덧셈", "➖ 뺄셈"])
 
 # ────────── 덧셈 ──────────
 with tab_add:
-    with st.sidebar:
-        st.markdown("### 덧셈 채점")
-        add_guess = st.number_input("두 수의 합은 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="add_guess_input")
-        add_check = st.button("덧셈 채점", use_container_width=True, key="add_check_btn")
-        st.markdown("<hr>", unsafe_allow_html=True)
-        BUBBLE_ADD = st.empty()
-
-    def bubble_add(text: str):
-        BUBBLE_ADD.markdown(
-            f"""<div style="background:#e5e7eb;padding:8px;border-radius:10px;">
-                 <div style="background:#fff;border-radius:12px;padding:16px;
-                     font-size:22px;font-weight:1000;color:#0F766E;text-align:center;
-                     box-shadow:0 2px 8px rgba(0,0,0,0.08);">{text}</div></div>""",
-            unsafe_allow_html=True
-        )
-    def clear_bubble_add(): BUBBLE_ADD.empty()
-
     row_top = st.columns(2, gap="large")
     row_bot = st.columns(1)
+
     A_o0, A_t0, A_h0, A_k0 = split_digits(st.session_state["A"])
     B_o0, B_t0, B_h0, B_k0 = split_digits(st.session_state["B"])
 
@@ -300,9 +299,10 @@ with tab_add:
         for ph, val in [(R_o_num,o),(R_t_num,t),(R_h_num,h),(R_k_num,k)]:
             ph.markdown(f"<div style='text-align:center;font-size:44px;font-weight:1000;line-height:1;'>{val}</div>", unsafe_allow_html=True)
 
+    # 덧셈 상태
     add_A = {"o":A_o0, "t":A_t0, "h":A_h0, "k":A_k0}
     add_B = {"o":B_o0, "t":B_t0, "h":B_h0, "k":B_k0}
-    add_R = {"o":0, "t":0, "h":0, "k":0}
+    add_R = {"o":0,    "t":0,    "h":0,    "k":0}
 
     def render_all_add(label=None):
         set_numbers(A_nums, add_A["o"], add_A["t"], add_A["h"], add_A["k"])
@@ -320,51 +320,60 @@ with tab_add:
     render_all_add()
 
     if st.button("▶ (덧셈) 애니메이션 시작", use_container_width=True, key="run_add"):
-        clear_bubble_add()
-        # 0.001
+        # 0.001 자리
         for _ in range(add_A["k"]):
             add_A["k"] -= 1; add_R["k"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["k"] == 10:
-                flash_micros_as_rod(R_K); bubble_add("0.001이 10개 모여 0.01이 됐어요.")
-                add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
+                show_alert("0.001이 10개 모여 0.01이 됐어요.<br><b>소수 둘째 자리로 1 받아올림할게요.</b>")
+                flash_micros_as_rod(R_K)
+                add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE)
         for _ in range(add_B["k"]):
             add_B["k"] -= 1; add_R["k"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["k"] == 10:
-                flash_micros_as_rod(R_K); bubble_add("0.001이 10개 모여 0.01이 됐어요.")
-                add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
-        # 0.01
+                show_alert("0.001이 10개 모여 0.01이 됐어요.<br><b>소수 둘째 자리로 1 받아올림할게요.</b>")
+                flash_micros_as_rod(R_K)
+                add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE)
+
+        # 0.01 자리
         for _ in range(add_A["h"]):
             add_A["h"] -= 1; add_R["h"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["h"] == 10:
-                flash_rods_as_plate(R_H); bubble_add("0.01이 10개 모여 0.1이 됐어요.")
-                add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
+                show_alert("0.01이 10개 모여 0.1이 됐어요.<br><b>소수 첫째 자리로 1 받아올림할게요.</b>")
+                flash_rods_as_plate(R_H)
+                add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE)
         for _ in range(add_B["h"]):
             add_B["h"] -= 1; add_R["h"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["h"] == 10:
-                flash_rods_as_plate(R_H); bubble_add("0.01이 10개 모여 0.1이 됐어요.")
-                add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
-        # 0.1
+                show_alert("0.01이 10개 모여 0.1이 됐어요.<br><b>소수 첫째 자리로 1 받아올림할게요.</b>")
+                flash_rods_as_plate(R_H)
+                add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE)
+
+        # 0.1 자리
         for _ in range(add_A["t"]):
             add_A["t"] -= 1; add_R["t"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["t"] == 10:
-                flash_plates_as_cube(R_T, R_O, add_R["o"]); bubble_add("0.1이 10개 모여 1이 됐어요.")
-                add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
+                show_alert("0.1이 10개 모여 1이 됐어요.<br><b>일의 자리로 1 받아올림할게요.</b>")
+                flash_plates_as_cube(R_T, R_O, add_R["o"])
+                add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE)
         for _ in range(add_B["t"]):
             add_B["t"] -= 1; add_R["t"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["t"] == 10:
-                flash_plates_as_cube(R_T, R_O, add_R["o"]); bubble_add("0.1이 10개 모여 1이 됐어요.")
-                add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE); clear_bubble_add()
-        # 1
+                show_alert("0.1이 10개 모여 1이 됐어요.<br><b>일의 자리로 1 받아올림할게요.</b>")
+                flash_plates_as_cube(R_T, R_O, add_R["o"])
+                add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE)
+
+        # 1 자리
         for _ in range(add_A["o"]):
             add_A["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
         for _ in range(add_B["o"]):
             add_B["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-        # 복구(상단 표시 유지)
-        add_A = {"o":A_o0, "t":A_t0, "h":A_h0, "k":A_k0}
-        add_B = {"o":B_o0, "t":B_t0, "h":B_h0, "k":B_k0}
-        render_all_add()
+
+        # 최종 렌더 + 완료음
+        render_all_add(); play_sound(SND_OK)
 
     # 채점(덧셈)
+    add_guess = st.sidebar.number_input("두 수의 합은 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="add_guess_input")
+    add_check = st.sidebar.button("덧셈 채점", use_container_width=True, key="add_check_btn")
     true_sum_add = round(float(f"{st.session_state['A']:.3f}") + float(f"{st.session_state['B']:.3f}"), 3)
     if add_check:
         st.write("### 덧셈 채점"); st.metric("정답", f"{true_sum_add:.3f}")
@@ -375,32 +384,15 @@ with tab_add:
 
 # ────────── 뺄셈 ──────────
 with tab_sub:
-    with st.sidebar:
-        st.markdown("### 뺄셈 채점")
-        sub_guess = st.number_input("두 수의 차는 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="sub_guess_input")
-        sub_check = st.button("뺄셈 채점", use_container_width=True, key="sub_check_btn")
-        st.markdown("<hr>", unsafe_allow_html=True)
-        BUBBLE_SUB = st.empty()
-
-    def bubble_sub(text: str):
-        BUBBLE_SUB.markdown(
-            f"""<div style="background:#e5e7eb;padding:8px;border-radius:10px;">
-                 <div style="background:#fff;border-radius:12px;padding:16px;
-                     font-size:22px;font-weight:1000;color:#0F766E;text-align:center;
-                     box-shadow:0 2px 8px rgba(0,0,0,0.08);">{text}</div></div>""",
-            unsafe_allow_html=True
-        )
-    def clear_bubble_sub(): BUBBLE_SUB.empty()
-
     row_top = st.columns(2, gap="large")
     row_bot = st.columns(1)
+
     A0_o, A0_t, A0_h, A0_k = split_digits(st.session_state["A"])
     B0_o, B0_t, B0_h, B0_k = split_digits(st.session_state["B"])
 
-    # 뺄셈 전용 독립 상태 (덧셈과 전역 충돌 방지)
-    sub_A = {"o":A0_o, "t":A0_t, "h":A0_h, "k":A0_k}  # 화면 표기
-    sub_B = {"o":B0_o, "t":B0_t, "h":B0_h, "k":B0_k}  # 화면 표기
-    res   = {"o":0, "t":0, "h":0, "k":0}              # 결과판 실제 연산 상태
+    sub_A = {"o":A0_o, "t":A0_t, "h":A0_h, "k":A0_k}  # 표시용(원래 수)
+    sub_B = {"o":B0_o, "t":B0_t, "h":B0_h, "k":B0_k}  # 표시용(덜어내는 수)
+    res   = {"o":0,     "t":0,     "h":0,     "k":0}  # 결과판 상태
 
     A_nums, (F_O, F_T, F_H, F_K) = number_row(row_top[0], sub_A["o"], sub_A["t"], sub_A["h"], sub_A["k"], "첫번째 수(원래 수)")
     B_nums, (S_O, S_T, S_H, S_K) = number_row(row_top[1], sub_B["o"], sub_B["t"], sub_B["h"], sub_B["k"], "두번째 수(덜어내는 수)")
@@ -432,82 +424,94 @@ with tab_sub:
 
     render_all_sub()
 
-    # ── 자리별 부족시 받아내림: 한 번 알리고, 깜빡임/변환 후, 10개 내려옴 ──
+    # 받아내림 헬퍼(메인 말풍선 7초 → 깜빡임 → 자릿값 보충)
     def borrow_for_k(need):
         if res["k"] >= need: return
-        bubble_sub(f"{res['k']}에서 {need}을 뺄 수 없어요!")
+        show_alert(f"{res['k']}에서 {need}을 뺄 수 없어요!<br><b>10을 0.001×10으로 받아내림할게요.</b>")
         if res["h"] > 0:
             flash_one_rod_to_ten_micros(R_H, R_K)
             res["h"] -= 1; res["k"] += 10
-            render_all_sub(label="H"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub(); return
+            render_all_sub(label="H"); time.sleep(STEP_DELAY_MOVE); return
         if res["t"] > 0:
-            bubble_sub("0.1 하나를 0.01 열 개로 바꿔 먼저 내려올게요.")
+            show_alert("0.1 하나를 0.01 열 개로 바꿔 먼저 내려올게요.")
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
-            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub()
+            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE)
             borrow_for_k(need); return
         if res["o"] > 0:
-            bubble_sub("1 하나를 0.1 열 개로 바꿔 내려올게요.")
+            show_alert("1 하나를 0.1 열 개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub()
+            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
             borrow_for_k(need); return
 
     def borrow_for_h(need):
         if res["h"] >= need: return
-        bubble_sub(f"{res['h']}에서 {need}을 뺄 수 없어요!")
+        show_alert(f"{res['h']}에서 {need}을 뺄 수 없어요!<br><b>0.1을 0.01×10으로 받아내림할게요.</b>")
         if res["t"] > 0:
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
-            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub(); return
+            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE); return
         if res["o"] > 0:
-            bubble_sub("1 하나를 0.1 열 개로 바꿔 내려올게요.")
+            show_alert("1 하나를 0.1 열 개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub()
+            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
             borrow_for_h(need); return
 
     def borrow_for_t(need):
         if res["t"] >= need: return
-        bubble_sub(f"{res['t']}에서 {need}을 뺄 수 없어요!")
+        show_alert(f"{res['t']}에서 {need}을 뺄 수 없어요!<br><b>1을 0.1×10으로 받아내림할게요.</b>")
         if res["o"] > 0:
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); clear_bubble_sub(); return
+            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); return
 
-    # ── 실행(뺄셈): A 전부 결과로 옮기고 → 자리별로 B만큼 빼기 ──
+    # 실행(뺄셈): A 즉시 일괄 반영 → 자리별 차감 (덜어내는 수도 함께 감소)
     if st.button("▶ (뺄셈) 애니메이션 시작", use_container_width=True, key="run_sub"):
-        clear_bubble_sub()
+        # A 즉시 결과로(애니메이션 없음)
+        res["k"] += sub_A["k"]; sub_A["k"] = 0
+        res["h"] += sub_A["h"]; sub_A["h"] = 0
+        res["t"] += sub_A["t"]; sub_A["t"] = 0
+        res["o"] += sub_A["o"]; sub_A["o"] = 0
+        render_all_sub()
 
-        # ① A를 결과에 '전부' 옮김 (원래 수 블록은 사라짐)
-        for _ in range(sub_A["k"]): sub_A["k"] -= 1; res["k"] += 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-        for _ in range(sub_A["h"]): sub_A["h"] -= 1; res["h"] += 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-        for _ in range(sub_A["t"]): sub_A["t"] -= 1; res["t"] += 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-        for _ in range(sub_A["o"]): sub_A["o"] -= 1; res["o"] += 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
-
-        # ② 자리별로 '한 번' 알리고(부족 시 받아내림 1회), 그 다음 need개를 '하나씩' 차감
+        # 0.001 자리
         if sub_B["k"] > 0:
-            if res["k"] < sub_B["k"]: borrow_for_k(sub_B["k"])   # 예: 7→17
-            for _ in range(sub_B["k"]):
-                res["k"] -= 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
+            need = sub_B["k"]
+            if res["k"] < need: borrow_for_k(need)
+            for _ in range(need):
+                res["k"] -= 1; sub_B["k"] -= 1
+                render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
+        # 0.01 자리
         if sub_B["h"] > 0:
-            if res["h"] < sub_B["h"]: borrow_for_h(sub_B["h"])   # 예: 5→15
-            for _ in range(sub_B["h"]):
-                res["h"] -= 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
+            need = sub_B["h"]
+            if res["h"] < need: borrow_for_h(need)
+            for _ in range(need):
+                res["h"] -= 1; sub_B["h"] -= 1
+                render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
+        # 0.1 자리
         if sub_B["t"] > 0:
-            if res["t"] < sub_B["t"]: borrow_for_t(sub_B["t"])
-            for _ in range(sub_B["t"]):
-                res["t"] -= 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
+            need = sub_B["t"]
+            if res["t"] < need: borrow_for_t(need)
+            for _ in range(need):
+                res["t"] -= 1; sub_B["t"] -= 1
+                render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
+        # 1 자리
         if sub_B["o"] > 0:
-            for _ in range(sub_B["o"]):
-                res["o"] -= 1; render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
+            need = sub_B["o"]
+            for _ in range(need):
+                res["o"] -= 1; sub_B["o"] -= 1
+                render_all_sub(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
         render_all_sub(); play_sound(SND_OK)
 
     # 채점(뺄셈)
+    sub_guess = st.sidebar.number_input("두 수의 차는 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="sub_guess_input")
+    sub_check = st.sidebar.button("뺄셈 채점", use_container_width=True, key="sub_check_btn")
     true_diff = round(float(f"{st.session_state['A']:.3f}") - float(f"{st.session_state['B']:.3f}"), 3)
     if sub_check:
         st.write("### 뺄셈 채점"); st.metric("정답", f"{true_diff:.3f}")
@@ -515,6 +519,10 @@ with tab_sub:
             st.success("정답이에요! ✅"); play_sound(SND_OK); st.balloons()
         else:
             st.error("아쉽! 다시 시도해봐요. (받아내림 과정을 잘 살펴보세요)"); play_sound(SND_WRONG)
+
+
+
+
 
 
 
