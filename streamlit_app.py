@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-# Decimal Blocks 3D — Add/Sub up to Thousandths
-# - 덧셈: 10개 도달 시 메인 큰 말풍선(7초) → 깜빡임 → 상위 자리로 올림, 완료시 효과음
-# - 뺄셈: 시작 시 A를 결과판에 즉시 반영(애니메이션 없음) → 자리별 차감은 하나씩,
-#        필요 시 메인 큰 말풍선(7초) → 깜빡임 → 받아내림 → 계속 차감
-# - 뺄셈 차감 중 ‘덜어내는 수’도 동시에 1씩 줄어 1:1 대응이 보이도록
+# Decimal Blocks 3D — Add/Sub up to Thousandths + 교사 대시보드 연동(제출 폼 포함)
+# - 말풍선 4초(메인 큰 알림) → 깜빡임 → 변환
+# - 덧셈: 하나씩 이동 + 받아올림 강조, 완료 시 효과음
+# - 뺄셈: 시작 시 A를 결과판에 '즉시' 반영(애니메이션 없음) → 자리별 차감(받아내림 강조)
+# - 뺄셈 차감 중 덜어내는 수 숫자/블록도 함께 감소(1:1 대응)
+# - 사이드바: 역할/교사 인증 + 첫번째/두번째 수 입력 + 소리 버튼
+# - 하단: 학생 제출 폼(세션에 누적) → pages/1_교사_대시보드.py에서 집계
 
 import os, base64, time
 from typing import Optional, Tuple
@@ -11,6 +13,15 @@ import matplotlib
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import streamlit as st
+
+# ────────── 세션 기본값 보장 ──────────
+def ensure_defaults():
+    ss = st.session_state
+    ss.setdefault("submissions", [])
+    ss.setdefault("teacher_ok", False)
+    ss.setdefault("A", 1.257)   # 첫번째 수
+    ss.setdefault("B", 0.078)   # 두번째 수
+ensure_defaults()
 
 # ────────── 글꼴 ──────────
 matplotlib.rcParams["font.family"] = [
@@ -40,7 +51,7 @@ BLINK_CYCLES        = 2
 BLINK_INTERVAL      = 0.60
 CARRY_PAUSE_BEFORE  = 0.70
 CARRY_PAUSE_AFTER   = 0.70
-ALERT_SECONDS       = 7.0      # 메인 말풍선 표시 시간
+ALERT_SECONDS       = 4.0      # 메인 말풍선 표시시간(요청: 4초)
 
 # ────────── 숫자 분해 ──────────
 def split_digits(x: float):
@@ -94,10 +105,10 @@ GAP_PLATE_Z = 0.10
 S = 1.0 + 9*GAP_ROD_X
 PLATE_THICK = max((S - 9*GAP_PLATE_Z)/10.0, 0.001)
 
-SIZE_MICRO = (0.1, 0.1, 0.1)
-SIZE_ROD   = (0.1, S, 0.1)
-SIZE_PLATE = (S, S, PLATE_THICK)
-SIZE_CUBE  = (S, S, S)
+SIZE_MICRO = (0.1, 0.1, 0.1)      # 0.001
+SIZE_ROD   = (0.1, S, 0.1)        # 0.01
+SIZE_PLATE = (S, S, PLATE_THICK)  # 0.1
+SIZE_CUBE  = (S, S, S)            # 1
 
 def draw_micros(ax, n, color, gap_x=GAP_MICRO_X):
     dx, dy, dz = SIZE_MICRO
@@ -133,10 +144,10 @@ def to_tuple(data: Optional[bytes], filename: str) -> Optional[Tuple[bytes,str]]
     mime = "audio/mpeg" if ext == ".mp3" else "audio/wav"
     return (data, mime)
 
-SND_POP   = to_tuple(load_bytes("이동2.mp3"),        "이동2.mp3")
-SND_TRANS = to_tuple(load_bytes("변환.mp3"),          "변환.mp3")
-SND_OK    = to_tuple(load_bytes("정답 레벨업.mp3"),   "정답 레벨업.mp3")
-SND_WRONG = to_tuple(load_bytes("다시 생각해보세요.mp3"), "다시 생각해보세요.mp3")
+SND_POP   = to_tuple(load_bytes("이동2.mp3"),        "이동2.mp3")             # 이동
+SND_TRANS = to_tuple(load_bytes("변환.mp3"),          "변환.mp3")              # 변환/받아올림/내림
+SND_OK    = to_tuple(load_bytes("정답 레벨업.mp3"),   "정답 레벨업.mp3")       # 완료/정답
+SND_WRONG = to_tuple(load_bytes("다시 생각해보세요.mp3"), "다시 생각해보세요.mp3") # 오답
 
 def play_sound(t: Optional[Tuple[bytes,str]]):
     if not t: return
@@ -150,19 +161,59 @@ def play_sound(t: Optional[Tuple[bytes,str]]):
         unsafe_allow_html=True
     )
 
-# ────────── 사이드바 ──────────
+# ────────── 사이드바(역할/인증 + 문제 입력 + 소리) ──────────
 with st.sidebar:
-    st.markdown("### 문제 설정")
-    if "A" not in st.session_state: st.session_state["A"] = 1.257
-    if "B" not in st.session_state: st.session_state["B"] = 0.078
-    st.number_input("첫번째 수 (0.000~9.999)", 0.000, 9.999, value=float(st.session_state["A"]),
-                    step=0.001, format="%.3f", key="A")
-    st.number_input("두번째 수 (0.000~9.999)", 0.000, 9.999, value=float(st.session_state["B"]),
-                    step=0.001, format="%.3f", key="B")
+    st.markdown("### 역할 선택 / 문제 설정 / 소리")
 
+    # 역할 & 교사 인증
+    role = st.radio("역할", ["학생", "교사"], horizontal=True, key="role_sel")
+    if role == "교사":
+        pw = st.text_input("교사 비밀번호", type="password", help="관리자가 정한 비밀번호를 입력하세요.")
+        teacher_pw = os.environ.get("TEACHER_PW", "teacher")
+        if pw and pw == teacher_pw:
+            st.session_state["teacher_ok"] = True
+            st.success("교사 인증 완료!")
+        elif pw:
+            st.error("비밀번호가 올바르지 않습니다.")
+
+    st.divider()
+
+    # 문제 수 입력(학생이 바꾸는 곳)
+    st.markdown("#### 문제 수 입력")
+    st.number_input(
+        "첫번째 수 (0.000~9.999)",
+        min_value=0.000, max_value=9.999,
+        value=float(st.session_state.get("A", 1.257)),
+        step=0.001, format="%.3f", key="A"
+    )
+    st.number_input(
+        "두번째 수 (0.000~9.999)",
+        min_value=0.000, max_value=9.999,
+        value=float(st.session_state.get("B", 0.078)),
+        step=0.001, format="%.3f", key="B"
+    )
+
+    st.caption("교사용 대시보드는 왼쪽 상단 메뉴 ▶ pages ▶ ‘교사 대시보드’에서 열 수 있어요.")
+
+    st.divider()
     if st.button("🔊 소리 켜기"):
         play_sound(SND_OK)
         st.success("소리 사용이 허용되었습니다.")
+
+# 교사 대시보드 안내(본문) + 인증 배지
+if st.session_state.get("teacher_ok", False):
+    st.markdown(
+        """
+        <div style="padding:10px 14px;border:2px solid #16a34a;border-radius:10px;
+                    background:#f0fdf4;margin:6px 0 10px 0;">
+          <b style="color:#166534">✔ 교사 인증됨</b>
+          <div style="color:#065f46">좌측 상단 메뉴 ▶ <b>pages</b> ▶ <b>교사 대시보드</b>에서 전체 지표를 볼 수 있어요.</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+else:
+    st.caption("교사용 대시보드는 왼쪽 상단 메뉴 ▶ pages ▶ ‘교사 대시보드’에서 열 수 있어요.")
 
 # ────────── 메인 말풍선(큰 알림) ──────────
 ALERT = st.empty()
@@ -186,7 +237,7 @@ def show_alert(text: str, seconds: float = ALERT_SECONDS):
     time.sleep(seconds)
     ALERT.empty()
 
-# ────────── 깜빡임 ──────────
+# ────────── 깜빡임(덧셈 캐리 / 뺄셈 보로우) ──────────
 def flash_micros_as_rod(ph):
     time.sleep(CARRY_PAUSE_BEFORE)
     for _ in range(BLINK_CYCLES):
@@ -211,7 +262,6 @@ def flash_plates_as_cube(ph_T, ph_O, o_now):
         fig, ax = scene_axes(); draw_cubes(ax, o_now,   COLOR_ONES ); ph_O.pyplot(fig, True); plt.close(fig); time.sleep(0.25)
     time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
 
-# (뺄셈) 받아내림 깜빡임
 def flash_one_rod_to_ten_micros(ph_source_H, ph_dest_K):
     time.sleep(CARRY_PAUSE_BEFORE)
     for _ in range(BLINK_CYCLES):
@@ -299,7 +349,6 @@ with tab_add:
         for ph, val in [(R_o_num,o),(R_t_num,t),(R_h_num,h),(R_k_num,k)]:
             ph.markdown(f"<div style='text-align:center;font-size:44px;font-weight:1000;line-height:1;'>{val}</div>", unsafe_allow_html=True)
 
-    # 덧셈 상태
     add_A = {"o":A_o0, "t":A_t0, "h":A_h0, "k":A_k0}
     add_B = {"o":B_o0, "t":B_t0, "h":B_h0, "k":B_k0}
     add_R = {"o":0,    "t":0,    "h":0,    "k":0}
@@ -320,7 +369,7 @@ with tab_add:
     render_all_add()
 
     if st.button("▶ (덧셈) 애니메이션 시작", use_container_width=True, key="run_add"):
-        # 0.001 자리
+        # 0.001
         for _ in range(add_A["k"]):
             add_A["k"] -= 1; add_R["k"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["k"] == 10:
@@ -334,7 +383,7 @@ with tab_add:
                 flash_micros_as_rod(R_K)
                 add_R["k"] = 0; add_R["h"] += 1; render_all_add(label="H"); time.sleep(STEP_DELAY_MOVE)
 
-        # 0.01 자리
+        # 0.01
         for _ in range(add_A["h"]):
             add_A["h"] -= 1; add_R["h"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["h"] == 10:
@@ -348,7 +397,7 @@ with tab_add:
                 flash_rods_as_plate(R_H)
                 add_R["h"] = 0; add_R["t"] += 1; render_all_add(label="T"); time.sleep(STEP_DELAY_MOVE)
 
-        # 0.1 자리
+        # 0.1
         for _ in range(add_A["t"]):
             add_A["t"] -= 1; add_R["t"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
             if add_R["t"] == 10:
@@ -362,25 +411,14 @@ with tab_add:
                 flash_plates_as_cube(R_T, R_O, add_R["o"])
                 add_R["t"] = 0; add_R["o"] += 1; render_all_add(label="O"); time.sleep(STEP_DELAY_MOVE)
 
-        # 1 자리
+        # 1
         for _ in range(add_A["o"]):
             add_A["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
         for _ in range(add_B["o"]):
             add_B["o"] -= 1; add_R["o"] += 1; render_all_add(); play_sound(SND_POP); time.sleep(STEP_DELAY_MOVE)
 
-        # 최종 렌더 + 완료음
+        # 완료 효과음
         render_all_add(); play_sound(SND_OK)
-
-    # 채점(덧셈)
-    add_guess = st.sidebar.number_input("두 수의 합은 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="add_guess_input")
-    add_check = st.sidebar.button("덧셈 채점", use_container_width=True, key="add_check_btn")
-    true_sum_add = round(float(f"{st.session_state['A']:.3f}") + float(f"{st.session_state['B']:.3f}"), 3)
-    if add_check:
-        st.write("### 덧셈 채점"); st.metric("정답", f"{true_sum_add:.3f}")
-        if abs(true_sum_add - add_guess) < 1e-12:
-            st.success("정답이에요! ✅"); play_sound(SND_OK); st.balloons()
-        else:
-            st.error("아쉽! 다시 시도해봐요."); play_sound(SND_WRONG)
 
 # ────────── 뺄셈 ──────────
 with tab_sub:
@@ -424,7 +462,7 @@ with tab_sub:
 
     render_all_sub()
 
-    # 받아내림 헬퍼(메인 말풍선 7초 → 깜빡임 → 자릿값 보충)
+    # 받아내림 헬퍼(메인 말풍선 4초 → 깜빡임 → 자릿값 보충)
     def borrow_for_k(need):
         if res["k"] >= need: return
         show_alert(f"{res['k']}에서 {need}을 뺄 수 없어요!<br><b>10을 0.001×10으로 받아내림할게요.</b>")
@@ -509,16 +547,54 @@ with tab_sub:
 
         render_all_sub(); play_sound(SND_OK)
 
-    # 채점(뺄셈)
-    sub_guess = st.sidebar.number_input("두 수의 차는 얼마일까요?", value=0.000, step=0.001, format="%.3f", key="sub_guess_input")
-    sub_check = st.sidebar.button("뺄셈 채점", use_container_width=True, key="sub_check_btn")
-    true_diff = round(float(f"{st.session_state['A']:.3f}") - float(f"{st.session_state['B']:.3f}"), 3)
-    if sub_check:
-        st.write("### 뺄셈 채점"); st.metric("정답", f"{true_diff:.3f}")
-        if abs(true_diff - sub_guess) < 1e-12:
-            st.success("정답이에요! ✅"); play_sound(SND_OK); st.balloons()
+# ────────── [학생] 학습 결과 제출하기 ──────────
+with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송)", expanded=False):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+      klass = st.selectbox("학급", ["4-사랑","4-기쁨","4-보람","4-행복","기타"], index=0)
+        nickname = st.text_input("닉네임(또는 이름 이니셜)")
+    with col2:
+        quest = st.text_area("오늘의 문제/과제(간단히)", height=80, placeholder="예: 1.257 + 0.078에서 받아올림이 언제 일어났나요?")
+    with col3:
+        st.markdown("**자기평가(각 0–2점)**")
+        r1 = st.slider("개념이해", 0, 2, 1)
+        r2 = st.slider("참여도", 0, 2, 1)
+        r3 = st.slider("설명하기", 0, 2, 1)
+        rubric_total = r1 + r2 + r3
+
+    submitted = st.button("제출하기", use_container_width=True)
+    if submitted:
+        if not nickname.strip():
+            st.error("닉네임을 입력해 주세요.")
         else:
-            st.error("아쉽! 다시 시도해봐요. (받아내림 과정을 잘 살펴보세요)"); play_sound(SND_WRONG)
+            st.session_state["submissions"].append({
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "class": klass,
+                "nickname": nickname.strip(),
+                "quest": quest.strip(),
+                "rubric_1": r1,
+                "rubric_2": r2,
+                "rubric_3": r3,
+                "rubric_total": rubric_total,
+            })
+            st.success("제출 완료! 교사 대시보드에서 확인할 수 있어요.")
+# ────────── (교사용) 미니 대시보드 프리뷰 ──────────
+if st.session_state.get("teacher_ok", False):
+    subs = st.session_state.get("submissions", [])
+    st.divider()
+    st.subheader("📊 교사용 미니 패널 (최근 5건)")
+    if not subs:
+        st.info("아직 제출이 없습니다. 학생이 제출하면 여기에서 최근 5건을 미리 볼 수 있어요. 전체 지표는 pages ▶ 교사 대시보드에서 확인하세요.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame(subs)
+        cols = ["timestamp","class","nickname","quest","rubric_total"]
+        cols = [c for c in cols if c in df.columns]
+        st.dataframe(
+            df[cols].sort_values("timestamp", ascending=False).head(5),
+            use_container_width=True
+        )
+
 
 
 
