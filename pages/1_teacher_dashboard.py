@@ -3,6 +3,7 @@ import sqlite3
 from pathlib import Path
 from contextlib import closing
 from datetime import date, timedelta
+
 import pandas as pd
 import streamlit as st
 
@@ -13,24 +14,17 @@ if not st.session_state.get("teacher_ok", False):
     st.error("교사 전용 페이지입니다. 메인 화면 사이드바에서 '교사' 선택 후 비밀번호를 입력하세요.")
     st.stop()
 
-# --- DB 경로/연결(자동 마이그레이션 포함) ---
+# --- 30초 자동 새로고침 토글 ---
+try:
+    from streamlit_autorefresh import st_autorefresh
+    if st.toggle("30초 자동 새로고침", value=False, key="teacher_autorefresh"):
+        st_autorefresh(interval=30_000, key="teacher_dash_autorefresh_tabs")
+except Exception:
+    st.caption("⏱ `streamlit-autorefresh` 미설치 상태(선택 사항). requirements.txt에 추가하면 자동 새로고침 사용 가능.")
+
+# --- DB 유틸 (루트/submissions.db 고정) ---
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH  = str(ROOT_DIR / "submissions.db")
-
-REQUIRED_COLS = [
-    ("timestamp", "TEXT"),
-    ("class", "TEXT"),
-    ("nickname", "TEXT"),
-    ("quest", "TEXT"),
-    ("rubric_1", "INTEGER"),
-    ("rubric_2", "INTEGER"),
-    ("rubric_3", "INTEGER"),
-    ("rubric_total", "INTEGER"),
-    ("guess_mode", "TEXT"),
-    ("guess_value", "TEXT"),
-    ("guess_correct", "INTEGER"),
-    ("correct_answer", "TEXT"),
-]
 
 @st.cache_resource
 def get_conn():
@@ -53,11 +47,6 @@ def get_conn():
               correct_answer TEXT
             )
         """)
-        cur = conn.execute("PRAGMA table_info(submissions)")
-        cols_now = {row[1] for row in cur.fetchall()}
-        for col_name, col_type in REQUIRED_COLS:
-            if col_name not in cols_now:
-                conn.execute(f"ALTER TABLE submissions ADD COLUMN {col_name} {col_type}")
     return conn
 
 def fetch_all() -> pd.DataFrame:
@@ -76,38 +65,25 @@ def fetch_all() -> pd.DataFrame:
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
 
-# --- 상단 바: 새로고침/자동 새로고침 ---
-topL, topR = st.columns([1, 4])
-with topL:
-    if st.button("🔄 새로고침"):
-        try:
-            st.rerun()
-        except Exception:
-            st.experimental_rerun()
-with topR:
-    st.title("📊 교사 대시보드")
-    st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
+st.title("📊 교사 대시보드")
+st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
 
-try:
-    from streamlit_autorefresh import st_autorefresh
-    if st.toggle("30초 자동 새로고침", value=False, key="teacher_autorefresh"):
-        st_autorefresh(interval=30_000, key="teacher_dash_autorefresh_tabs")
-except Exception:
-    st.caption("⏱ `streamlit-autorefresh` 미설치 상태(선택). requirements.txt에 `streamlit-autorefresh>=0.0.2` 추가하면 사용 가능.")
+# 수동 새로고침
+if st.button("🔄 새로고침"):
+    st.rerun()
 
-# --- 데이터 로드 ---
+# 데이터 로딩 및 전처리
 df = fetch_all()
 if df.empty:
-    st.warning("아직 제출이 없습니다. 학생 화면에서 제출 후 이 페이지를 새로고침하세요.")
+    st.warning("아직 제출이 없습니다. 학생 화면에서 제출 후 다시 새로고침하세요.")
     st.stop()
 
-# 전처리
 df["dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
 df["date"] = df["dt"].dt.date
 df["rubric_total"] = pd.to_numeric(df["rubric_total"], errors="coerce")
 df["guess_correct_num"] = pd.to_numeric(df["guess_correct"], errors="coerce")
 
-# --- 필터 ---
+# 필터
 fltL, fltM, fltR = st.columns([2,2,3])
 with fltL:
     max_day = df["date"].max()
@@ -123,8 +99,7 @@ with fltR:
     sel_classes = st.multiselect("학급(복수 선택)", class_options, default=class_options)
 
 if start_day > end_day:
-    st.error("시작일이 종료일보다 늦을 수 없습니다.")
-    st.stop()
+    st.error("시작일이 종료일보다 늦을 수 없습니다."); st.stop()
 
 mask = (df["date"] >= start_day) & (df["date"] <= end_day) & (df["class"].isin(sel_classes))
 fdf = df.loc[mask].copy()
@@ -132,7 +107,7 @@ if fdf.empty:
     st.info("선택한 조건에 해당하는 제출이 없습니다. 필터를 조정해 주세요.")
     st.stop()
 
-# --- KPI ---
+# KPI
 K1, K2, K3, K4 = st.columns(4)
 with K1:
     st.metric("총 제출", len(fdf))
@@ -146,7 +121,7 @@ with K3:
 with K4:
     st.metric("최근 제출 시각", str(fdf.sort_values("dt").iloc[-1]["timestamp"]))
 
-# --- 표(최근 제출 / 학급별 제출수) ---
+# 최근 제출 & 학급별 제출 표
 T1, T2 = st.columns([2.1, 2.9])
 with T1:
     st.write("### 학급별 제출")
@@ -167,38 +142,16 @@ with T2:
 st.divider()
 st.write("### 시각화(탭)")
 
-# --- 차트 데이터 (안전한 영문 컬럼명으로 복사) ---
-# 1) 정답여부 비율
-_cc = fdf["guess_correct_num"].map({1: "Correct", 0: "Wrong"}).value_counts()
-correct_counts = (
-    _cc.rename_axis("label").reset_index(name="count")
-)
+# ===== 차트용 데이터 한 번만 계산 =====
+correct_counts = fdf["guess_correct_num"].map({1:"정답",0:"오답"}).value_counts().rename_axis("정답여부").reset_index(name="명")
+hist = (fdf["rubric_total"].dropna().astype(int)
+        .value_counts().sort_index().rename_axis("총점(0–6)").reset_index(name="명"))
+by_class_acc = (fdf.groupby("class")["guess_correct_num"].mean().mul(100).round(1)
+                .rename("정답률(%)").reset_index())
+by_class_cnt = fdf["class"].value_counts().rename_axis("학급").reset_index(name="제출 수")
+by_day = (fdf.groupby("date").size().rename("제출 수").reset_index().sort_values("date"))
 
-# 2) 자기평가 총점 분포
-_hist = fdf["rubric_total"].dropna().astype(int).value_counts().sort_index()
-hist = (
-    _hist.rename_axis("score").reset_index(name="count")
-)
-
-# 3) 학급별 정답률(%)
-_by_acc = fdf.groupby("class")["guess_correct_num"].mean().mul(100)
-by_class_acc = (
-    _by_acc.round(1).rename("acc_pct").reset_index()
-    .rename(columns={"class": "klass"})
-)
-
-# 4) 학급별 제출 수
-_by_cnt = fdf["class"].value_counts()
-by_class_cnt = (
-    _by_cnt.rename_axis("klass").reset_index(name="count")
-)
-
-# 5) 날짜별 제출 추이
-_by_day = fdf.groupby("date").size()
-by_day = (
-    _by_day.rename("count").reset_index().sort_values("date")
-)
-
+# ===== 탭 5개(중요도 순) =====
 tabs = st.tabs(["정답여부 비율", "자기평가 총점 분포", "학급별 정답률", "학급별 제출 수", "날짜별 제출 추이"])
 
 def altair_available() -> bool:
@@ -215,20 +168,14 @@ with tabs[0]:
     else:
         if altair_available():
             import altair as alt
-            chart = (
-                alt.Chart(correct_counts)
-                .mark_arc(innerRadius=50)
-                .encode(
-                    theta="count:Q",
-                    color=alt.Color("label:N", title="정답여부"),
-                    tooltip=[alt.Tooltip("label:N", title="정답여부"),
-                             alt.Tooltip("count:Q", title="명")]
-                )
-                .properties(height=360)
-            )
+            chart = alt.Chart(correct_counts).mark_arc(innerRadius=50).encode(
+                theta="명:Q",
+                color=alt.Color("정답여부:N", scale=alt.Scale(scheme="tableau10")),
+                tooltip=["정답여부","명"]
+            ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.bar_chart(correct_counts.set_index("label"))
+            st.bar_chart(correct_counts.set_index("정답여부"))
 
 # 2) 자기평가 총점 분포
 with tabs[1]:
@@ -237,20 +184,14 @@ with tabs[1]:
     else:
         if altair_available():
             import altair as alt
-            chart = (
-                alt.Chart(hist)
-                .mark_bar()
-                .encode(
-                    x=alt.X("score:O", title="자기평가 총점(0–6)"),
-                    y=alt.Y("count:Q", title="학생 수"),
-                    tooltip=[alt.Tooltip("score:O", title="총점"),
-                             alt.Tooltip("count:Q", title="명")]
-                )
-                .properties(height=360)
-            )
+            chart = alt.Chart(hist).mark_bar().encode(
+                x=alt.X("총점(0–6):O", title="자기평가 총점(0–6)"),
+                y=alt.Y("명:Q", title="학생 수"),
+                tooltip=["총점(0–6)","명"]
+            ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.bar_chart(hist.set_index("score"))
+            st.bar_chart(hist.set_index("총점(0–6)"))
 
 # 3) 학급별 정답률
 with tabs[2]:
@@ -259,20 +200,14 @@ with tabs[2]:
     else:
         if altair_available():
             import altair as alt
-            chart = (
-                alt.Chart(by_class_acc)
-                .mark_bar()
-                .encode(
-                    x=alt.X("klass:N", sort="-y", title="학급"),
-                    y=alt.Y("acc_pct:Q", title="정답률(%)"),
-                    tooltip=[alt.Tooltip("klass:N", title="학급"),
-                             alt.Tooltip("acc_pct:Q", title="정답률(%)")]
-                )
-                .properties(height=360)
-            )
+            chart = alt.Chart(by_class_acc).mark_bar().encode(
+                x=alt.X("학급:N", sort="-y"),
+                y=alt.Y("정답률(%):Q"),
+                tooltip=["학급","정답률(%)"]
+            ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.bar_chart(by_class_acc.set_index("klass"))
+            st.bar_chart(by_class_acc.set_index("학급"))
 
 # 4) 학급별 제출 수
 with tabs[3]:
@@ -281,20 +216,14 @@ with tabs[3]:
     else:
         if altair_available():
             import altair as alt
-            chart = (
-                alt.Chart(by_class_cnt)
-                .mark_bar()
-                .encode(
-                    y=alt.Y("klass:N", sort="-x", title="학급"),
-                    x=alt.X("count:Q", title="제출 수"),
-                    tooltip=[alt.Tooltip("klass:N", title="학급"),
-                             alt.Tooltip("count:Q", title="제출 수")]
-                )
-                .properties(height=360)
-            )
+            chart = alt.Chart(by_class_cnt).mark_bar().encode(
+                y=alt.Y("학급:N", sort="-x"),
+                x=alt.X("제출 수:Q"),
+                tooltip=["학급","제출 수"]
+            ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.bar_chart(by_class_cnt.set_index("klass"))
+            st.bar_chart(by_class_cnt.set_index("학급"))
 
 # 5) 날짜별 제출 추이
 with tabs[4]:
@@ -303,25 +232,20 @@ with tabs[4]:
     else:
         if altair_available():
             import altair as alt
-            chart = (
-                alt.Chart(by_day)
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X("date:T", title="날짜"),
-                    y=alt.Y("count:Q", title="제출 수"),
-                    tooltip=[alt.Tooltip("date:T", title="날짜"),
-                             alt.Tooltip("count:Q", title="제출 수")]
-                )
-                .properties(height=360)
-            )
+            chart = alt.Chart(by_day).mark_line(point=True).encode(
+                x=alt.X("date:T", title="날짜"),
+                y=alt.Y("제출 수:Q"),
+                tooltip=["date:T","제출 수:Q"]
+            ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
             st.line_chart(by_day.set_index("date"))
 
-
 st.divider()
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
+
 
 
 
