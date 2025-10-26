@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Decimal Blocks 3D — 학생 모드(덧셈/뺄셈 애니메이션 + 정답 맞혀보기 + 제출) + 교사 인증 시 자동 전환(안전)
+# Decimal Blocks 3D — 학생 모드(덧셈/뺄셈 애니메이션 + 정답 맞혀보기 + 제출) + 교사 인증 시 대시보드 전환
 import os, base64, time, sqlite3
 from contextlib import closing
 from typing import Optional, Tuple
@@ -13,13 +13,30 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import pandas as pd
 import streamlit as st
 
-# ────────── 공통/DB ──────────
+# ────────── 공통 경로/DB ──────────
 st.set_page_config(page_title="Decimal Blocks 3D", page_icon="🔢", layout="wide")
 ROOT = Path(__file__).resolve().parent
 DB_PATH = str(ROOT / "submissions.db")
 
+# 자동 마이그레이션이 반영된 스키마(필요 컬럼 정의)
+REQUIRED_COLS = [
+    ("timestamp", "TEXT"),
+    ("class", "TEXT"),
+    ("nickname", "TEXT"),
+    ("quest", "TEXT"),
+    ("rubric_1", "INTEGER"),
+    ("rubric_2", "INTEGER"),
+    ("rubric_3", "INTEGER"),
+    ("rubric_total", "INTEGER"),
+    ("guess_mode", "TEXT"),
+    ("guess_value", "TEXT"),
+    ("guess_correct", "INTEGER"),
+    ("correct_answer", "TEXT"),
+]
+
 @st.cache_resource
 def get_conn():
+    """테이블 생성 + 누락 컬럼 자동 추가(기존 DB도 안전히 업그레이드)."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     with conn:
         conn.execute("""
@@ -39,21 +56,28 @@ def get_conn():
               correct_answer TEXT
             )
         """)
+        cur = conn.execute("PRAGMA table_info(submissions)")
+        cols_now = {row[1] for row in cur.fetchall()}  # row[1] = column name
+        for col_name, col_type in REQUIRED_COLS:
+            if col_name not in cols_now:
+                conn.execute(f"ALTER TABLE submissions ADD COLUMN {col_name} {col_type}")
     return conn
 
 def add_submission(row: dict):
+    """
+    현재 DB 실제 컬럼 목록을 읽어 '겹치는 컬럼만' DB 컬럼 순서대로 INSERT.
+    (옛 DB라도 안전, 신규 컬럼 없어도 오류X)
+    """
     conn = get_conn()
     with conn:
-        conn.execute("""
-            INSERT INTO submissions
-            (timestamp,class,nickname,quest,rubric_1,rubric_2,rubric_3,rubric_total,
-             guess_mode,guess_value,guess_correct,correct_answer)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            row.get("timestamp"), row.get("class"), row.get("nickname"), row.get("quest"),
-            row.get("rubric_1"), row.get("rubric_2"), row.get("rubric_3"), row.get("rubric_total"),
-            row.get("guess_mode"), row.get("guess_value"), row.get("guess_correct"), row.get("correct_answer"),
-        ))
+        cur = conn.execute("PRAGMA table_info(submissions)")
+        db_cols = [r[1] for r in cur.fetchall()]  # 실제 테이블 컬럼 순서
+        insert_cols = [c for c in db_cols if c != "id" and c in row]
+        placeholders = ", ".join(["?"] * len(insert_cols))
+        col_list     = ", ".join(insert_cols)
+        values       = [row[c] for c in insert_cols]
+        sql = f"INSERT INTO submissions ({col_list}) VALUES ({placeholders})"
+        conn.execute(sql, values)
 
 def kst_now_str():
     return datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S")
@@ -80,13 +104,13 @@ with st.sidebar:
 
     if role == "교사":
         pw = st.text_input("교사 비밀번호", type="password", help="관리자가 정한 비밀번호")
-        teacher_pw = os.environ.get("TEACHER_PW", "teacher")  # 없으면 'teacher'
+        teacher_pw = os.environ.get("TEACHER_PW", "teacher")  # 환경변수 없으면 'teacher'
         if pw:
             if pw == teacher_pw:
                 st.session_state.teacher_ok = True
                 st.success("교사 인증 완료!")
 
-                # ✅ 인증 즉시 교사 대시보드로 전환(스위치 실패 시 링크 제공)
+                # 인증 즉시 대시보드로 전환(스위치 실패 시 링크 제공)
                 switched = False
                 try:
                     st.switch_page("pages/1_teacher_dashboard.py")
@@ -94,7 +118,8 @@ with st.sidebar:
                 except Exception:
                     pass
                 if not switched:
-                    st.page_link("pages/1_teacher_dashboard.py", label="📊 교사 대시보드 열기", icon="📊")
+                    st.page_link("pages/1_teacher_dashboard.py",
+                                 label="📊 교사 대시보드 열기", icon="📊")
             else:
                 st.session_state.teacher_ok = False
                 st.error("비밀번호가 올바르지 않습니다.")
@@ -108,7 +133,6 @@ if st.session_state.get("teacher_ok", False):
     except Exception:
         st.info("교사 대시보드로 이동하려면 아래를 클릭하세요.")
         st.page_link("pages/1_teacher_dashboard.py", label="📊 교사 대시보드 열기", icon="📊")
-    # 이후 학생용 렌더링은 자동으로 건너뜀
     st.stop()
 
 # ────────── 학생 모드 헤더/입력 ──────────
@@ -703,12 +727,19 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
                 "guess_correct":  st.session_state.get("last_guess_correct"),
                 "correct_answer": st.session_state.get("last_correct_answer"),
             }
-            add_submission(row)
-            st.success("제출 완료! 교사 대시보드에서 확인할 수 있어요.")
+            try:
+                add_submission(row)
+                st.success("제출 완료! 교사 대시보드에서 확인할 수 있어요.")
+            except Exception as e:
+                st.error(f"제출 중 오류가 발생했습니다: {e}")
+            # 제출 후 세션 힌트 초기화(교사에게만 보이는 정답여부 노출용)
             st.session_state["last_guess_mode"] = None
             st.session_state["last_guess_value"] = None
             st.session_state["last_guess_correct"] = None
             st.session_state["last_correct_answer"] = None
+
+
+
 
 
 
