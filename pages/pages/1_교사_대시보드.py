@@ -20,9 +20,9 @@ try:
     if st.toggle("30초 자동 새로고침", value=False, key="teacher_autorefresh"):
         st_autorefresh(interval=30_000, key="teacher_dash_autorefresh_tabs")
 except Exception:
-    st.caption("⏱ `streamlit-autorefresh` 미설치 상태(선택 사항). requirements.txt에 추가하면 자동 새로고침 사용 가능.")
+    st.caption("⏱ `streamlit-autorefresh` 미설치 상태(선택). requirements.txt에 `streamlit-autorefresh>=0.0.2` 추가하면 사용 가능.")
 
-# --- DB 유틸 (루트/submissions.db 고정) ---
+# --- DB 유틸 (루트/submissions.db) ---
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DB_PATH  = str(ROOT_DIR / "submissions.db")
 
@@ -65,12 +65,14 @@ def fetch_all() -> pd.DataFrame:
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
 
-st.title("📊 교사 대시보드")
-st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
-
-# 수동 새로고침
-if st.button("🔄 새로고침"):
-    st.rerun()
+# 상단 바
+topL, topR = st.columns([1, 4])
+with topL:
+    if st.button("🔄 새로고침"):
+        st.rerun()
+with topR:
+    st.title("📊 교사 대시보드")
+    st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
 
 # 데이터 로딩 및 전처리
 df = fetch_all()
@@ -142,7 +144,7 @@ with T2:
 st.divider()
 st.write("### 시각화(탭)")
 
-# ===== 차트용 데이터 한 번만 계산 =====
+# 차트용 데이터
 correct_counts = fdf["guess_correct_num"].map({1:"정답",0:"오답"}).value_counts().rename_axis("정답여부").reset_index(name="명")
 hist = (fdf["rubric_total"].dropna().astype(int)
         .value_counts().sort_index().rename_axis("총점(0–6)").reset_index(name="명"))
@@ -151,7 +153,6 @@ by_class_acc = (fdf.groupby("class")["guess_correct_num"].mean().mul(100).round(
 by_class_cnt = fdf["class"].value_counts().rename_axis("학급").reset_index(name="제출 수")
 by_day = (fdf.groupby("date").size().rename("제출 수").reset_index().sort_values("date"))
 
-# ===== 탭 5개(중요도 순) =====
 tabs = st.tabs(["정답여부 비율", "자기평가 총점 분포", "학급별 정답률", "학급별 제출 수", "날짜별 제출 추이"])
 
 def altair_available() -> bool:
@@ -244,6 +245,7 @@ with tabs[4]:
 st.divider()
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
 
 
 
