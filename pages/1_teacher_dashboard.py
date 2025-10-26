@@ -1,4 +1,13 @@
 # -*- coding: utf-8 -*-
+# 교사 대시보드(강화판)
+# - KST 기준 타임스탬프 표시
+# - 날짜/학급 필터
+# - KPI + 최근 제출/학급별 제출 표
+# - 탭 5개: 정답여부 비율, 자기평가 총점 분포, 학급별 정답률, 학급별 제출 수, 날짜별 제출 추이
+# - NEW: 자유응답 키워드(상위 빈도) 탭 추가
+# - 자동 새로고침 토글, 수동 새로고침 버튼
+
+import re
 import sqlite3
 from pathlib import Path
 from contextlib import closing
@@ -65,6 +74,13 @@ def fetch_all() -> pd.DataFrame:
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
 
+def altair_available() -> bool:
+    try:
+        import altair as alt  # noqa
+        return True
+    except Exception:
+        return False
+
 st.title("📊 교사 대시보드")
 st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
 
@@ -115,9 +131,9 @@ with K2:
     st.metric("평균 자기평가 총점", round(fdf["rubric_total"].dropna().astype(int).mean(), 2))
 with K3:
     if fdf["guess_correct_num"].notna().any():
-        st.metric("정답률(필터 범위)", f"{(fdf['guess_correct_num'].fillna(0).astype(int).mean()*100):.0f}%")
+        st.metric("전체 정답률(필터 범위)", f"{(fdf['guess_correct_num'].fillna(0).astype(int).mean()*100):.0f}%")
     else:
-        st.metric("정답률(필터 범위)", "—")
+        st.metric("전체 정답률(필터 범위)", "—")
 with K4:
     st.metric("최근 제출 시각", str(fdf.sort_values("dt").iloc[-1]["timestamp"]))
 
@@ -140,9 +156,9 @@ with T2:
     )
 
 st.divider()
-st.write("### 시각화(탭)")
+st.write("### 시각화 & 텍스트 분석(탭)")
 
-# ===== 차트용 데이터 한 번만 계산 =====
+# ===== 차트용 데이터 =====
 correct_counts = fdf["guess_correct_num"].map({1:"정답",0:"오답"}).value_counts().rename_axis("정답여부").reset_index(name="명")
 hist = (fdf["rubric_total"].dropna().astype(int)
         .value_counts().sort_index().rename_axis("총점(0–6)").reset_index(name="명"))
@@ -151,15 +167,34 @@ by_class_acc = (fdf.groupby("class")["guess_correct_num"].mean().mul(100).round(
 by_class_cnt = fdf["class"].value_counts().rename_axis("학급").reset_index(name="제출 수")
 by_day = (fdf.groupby("date").size().rename("제출 수").reset_index().sort_values("date"))
 
-# ===== 탭 5개(중요도 순) =====
-tabs = st.tabs(["정답여부 비율", "자기평가 총점 분포", "학급별 정답률", "학급별 제출 수", "날짜별 제출 추이"])
+# ===== 자유응답(quest) 키워드 처리 =====
+def tokenize_korean_en(s: str):
+    """
+    한글/영문/숫자를 단어로 추출. 한글은 2글자 이상, 영문/숫자는 2자 이상만 카운트.
+    """
+    if not isinstance(s, str):
+        return []
+    # 한글, 영문, 숫자 블록 추출
+    tokens = re.findall(r"[가-힣]{2,}|[A-Za-z0-9]{2,}", s)
+    return [t for t in tokens if t.strip()]
 
-def altair_available() -> bool:
-    try:
-        import altair as alt  # noqa
-        return True
-    except Exception:
-        return False
+stop_default = "에서\n그리고\n그러면\n하지만\n때문에\n다시\n또는\n그리고\n입니다\n예를\n예:".split("\n")
+with st.expander("🔎 자유응답(문항 요약) 키워드 분석 설정", expanded=False):
+    st.caption("불용어를 줄바꿈으로 입력하세요. (선택)")
+    stop_user = st.text_area("불용어 목록(선택, 줄바꿈 구분)", value="\n".join(stop_default))
+    stopwords = set([w.strip() for w in stop_user.splitlines() if w.strip()])
+
+from collections import Counter
+texts = fdf["quest"].dropna().astype(str).tolist()
+counter = Counter()
+for line in texts:
+    for tok in tokenize_korean_en(line):
+        if tok not in stopwords:
+            counter[tok] += 1
+kw_df = pd.DataFrame(counter.most_common(30), columns=["단어","빈도"]) if counter else pd.DataFrame(columns=["단어","빈도"])
+
+# ===== 탭(요청 순서 + 키워드) =====
+tabs = st.tabs(["정답여부 비율", "자기평가 총점 분포", "학급별 정답률", "학급별 제출 수", "날짜별 제출 추이", "자유응답 키워드"])
 
 # 1) 정답여부 비율
 with tabs[0]:
@@ -201,13 +236,14 @@ with tabs[2]:
         if altair_available():
             import altair as alt
             chart = alt.Chart(by_class_acc).mark_bar().encode(
-                x=alt.X("학급:N", sort="-y"),
+                x=alt.X("class:N", title="학급", sort="-y"),
                 y=alt.Y("정답률(%):Q"),
-                tooltip=["학급","정답률(%)"]
+                tooltip=["class","정답률(%)"]
             ).properties(height=360)
             st.altair_chart(chart, use_container_width=True)
         else:
-            st.bar_chart(by_class_acc.set_index("학급"))
+            # 컬럼명 한국어로 바꾸지 않고 index 기반으로도 표시 가능
+            st.bar_chart(by_class_acc.set_index("class"))
 
 # 4) 학급별 제출 수
 with tabs[3]:
@@ -241,9 +277,31 @@ with tabs[4]:
         else:
             st.line_chart(by_day.set_index("date"))
 
+# 6) 자유응답 키워드
+with tabs[5]:
+    st.write("**문항 요약(quest)에서 많이 등장한 단어 TOP 30**")
+    if kw_df.empty:
+        st.info("자유응답 데이터가 없거나, 유효한 단어가 없습니다.")
+    else:
+        ckw1, ckw2 = st.columns([2,3])
+        with ckw1:
+            st.dataframe(kw_df, use_container_width=True, height=360)
+        with ckw2:
+            if altair_available():
+                import altair as alt
+                chart = alt.Chart(kw_df).mark_bar().encode(
+                    y=alt.Y("단어:N", sort="-x"),
+                    x=alt.X("빈도:Q"),
+                    tooltip=["단어","빈도"]
+                ).properties(height=360)
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.bar_chart(kw_df.set_index("단어"))
+
 st.divider()
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
 
 
 
