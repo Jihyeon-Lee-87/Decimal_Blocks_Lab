@@ -35,9 +35,37 @@ def ensure_defaults():
     ss.setdefault("last_correct_answer", None)
 ensure_defaults()
 
-# ────────── DB (공용 SQLite; 루트 고정 경로) ──────────
-ROOT_DIR = Path(__file__).resolve().parent
-DB_PATH  = str(ROOT_DIR / "submissions.db")
+# ────────── DB (Cloud/Local 겸용: /mount/data 우선) ──────────
+import shutil
+from pathlib import Path
+
+def _writable_data_dir() -> Path:
+    # Streamlit Cloud에선 /mount/data 가 쓰기 가능
+    candidates = [Path("/mount/data"), Path.cwd() / ".data"]
+    for p in candidates:
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+            test = p / "_wtest"
+            with open(test, "w") as f:
+                f.write("ok")
+            test.unlink(missing_ok=True)
+            return p
+        except Exception:
+            continue
+    # 마지막 안전장치: 현재 폴더 (가능하면)
+    Path.cwd().mkdir(parents=True, exist_ok=True)
+    return Path.cwd()
+
+DATA_DIR = _writable_data_dir()
+DB_PATH  = str(DATA_DIR / "submissions.db")
+
+# 저장소에 예전 submissions.db(읽기 전용)가 있다면 최초 1회 복사
+REPO_DB = Path(__file__).resolve().parent / "submissions.db"
+if REPO_DB.exists() and not (DATA_DIR / "submissions.db").exists():
+    try:
+        shutil.copy2(REPO_DB, DATA_DIR / "submissions.db")
+    except Exception:
+        pass
 
 @st.cache_resource
 def get_conn():
@@ -56,6 +84,9 @@ def get_conn():
                 rubric_total INTEGER
             )
         """)
+        # 안정성 향상
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
 
 def ensure_guess_columns():
@@ -71,6 +102,7 @@ def ensure_guess_columns():
                 conn.execute(f"ALTER TABLE submissions ADD COLUMN {col} {ddl}")
             except Exception:
                 pass
+
 ensure_guess_columns()
 
 def add_submission(row: dict):
@@ -86,23 +118,42 @@ def add_submission(row: dict):
             row.get("rubric_1"), row.get("rubric_2"), row.get("rubric_3"), row.get("rubric_total"),
             row.get("guess_mode"), row.get("guess_value"), row.get("guess_correct"), row.get("correct_answer"),
         ))
-
+# ────────── 최근 제출 조회 유틸(미니 패널/대시보드 공용) ──────────
 def fetch_recent(limit=1000, start=None, end=None, classes=None) -> pd.DataFrame:
-    """필터 가능한 조회(미니 패널에서 사용)."""
+    """
+    submissions.db에서 최근 레코드를 읽어옵니다.
+    - start/end: 날짜(date) 필터
+    - classes: 학급 리스트 필터
+    - limit: 최신순 최대 N건
+    """
     conn = get_conn()
-    q = """SELECT id, timestamp, class, nickname, quest,
-                  rubric_1, rubric_2, rubric_3, rubric_total,
-                  guess_mode, guess_value, guess_correct, correct_answer
-           FROM submissions"""
+    q = """
+        SELECT
+          id, timestamp, class, nickname, quest,
+          rubric_1, rubric_2, rubric_3, rubric_total,
+          guess_mode, guess_value, guess_correct, correct_answer
+        FROM submissions
+    """
     df = pd.read_sql_query(q, conn)
+
     if df.empty:
         return df
+
+    # 문자열 timestamp → datetime/date
     df["dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df["date"] = df["dt"].dt.date
-    if start: df = df[df["date"] >= start]
-    if end:   df = df[df["date"] <= end]
-    if classes: df = df[df["class"].isin(classes)]
+
+    # 필터
+    if start is not None:
+        df = df[df["date"] >= start]
+    if end is not None:
+        df = df[df["date"] <= end]
+    if classes:
+        df = df[df["class"].isin(classes)]
+
+    # 최신순 정렬 + limit
     return df.sort_values("dt", ascending=False).head(limit).reset_index(drop=True)
+
 
 # ────────── 글꼴/스타일 ──────────
 matplotlib.rcParams["font.family"] = [
@@ -771,49 +822,54 @@ if st.session_state.get("teacher_ok", False):
         class_opts = ["4-사랑","4-기쁨","4-보람","4-행복","기타"]
         sel_classes = st.multiselect("학급(복수 선택)", class_opts, default=class_opts, key="minip_cls")
 
+    # ✅ 여기! 필터 값을 받아 DB에서 실제로 조회
     df = fetch_recent(limit=1000, start=start_day, end=end_day, classes=sel_classes)
 
+    # 이후 df를 사용해 표/상세/CSV 표시 (예시)
     if df.empty:
         st.info("선택한 조건에 해당하는 제출이 없습니다.")
     else:
-        # 보기 좋은 표
         df_disp = df.copy()
         df_disp["정답 유형"] = df_disp["guess_mode"].map({"add":"합","sub":"차"}).fillna("-")
         df_disp["정답여부"] = pd.to_numeric(df_disp["guess_correct"], errors="coerce").map({1:"정답",0:"오답"}).fillna("-")
         show_cols = ["timestamp","class","nickname","quest","정답 유형","guess_value","정답여부","correct_answer","rubric_total"]
         show_cols = [c for c in show_cols if c in df_disp.columns]
-
         st.dataframe(df_disp[show_cols], use_container_width=True)
 
-        # 상세보기: 타임스탬프/닉네임으로 선택
-        pickL, pickR = st.columns([2,3])
-        with pickL:
-            options = df.apply(lambda r: f"{r['timestamp']} · {r['class']} · {r['nickname']}", axis=1).tolist()
-            sel = st.selectbox("상세보기 선택", options, index=0)
-        with pickR:
-            row = df.iloc[options.index(sel)]
-            st.markdown("#### 상세")
-            st.write(f"**시각**: {row['timestamp']}  |  **학급**: {row['class']}  |  **닉네임**: {row['nickname']}")
-            st.write(f"**문항 요약**: {row.get('quest','')}")
-            st.write(f"**자기평가 총점**: {int(row.get('rubric_total',0))}")
-            gm = {"add":"합","sub":"차"}.get(row.get("guess_mode"), "-")
-            gc = {1:"정답",0:"오답"}.get(pd.to_numeric(row.get("guess_correct"), errors="coerce"), "-")
-            st.write(f"**정답 유형**: {gm}  |  **학생 입력값**: {row.get('guess_value','-')}  |  **정답여부**: {gc}  |  **정답**: {row.get('correct_answer','-')}")
-
-        # CSV 다운(필터 적용)
-        csv = df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_mini_filtered.csv", mime="text/csv")
+        # 상세보기 선택/표시, CSV 다운로드 등 계속…
 
 
+# ────────── 조회 유틸: 최근 제출 (필터 적용) ──────────
+def fetch_recent(limit=1000, start=None, end=None, classes=None) -> pd.DataFrame:
+    """
+    submissions.db에서 최근 레코드를 읽어옵니다.
+    - start/end: 날짜(date) 필터
+    - classes: 학급 리스트 필터
+    - limit: 최신순으로 최대 N건
+    """
+    conn = get_conn()
+    q = """
+        SELECT
+          id, timestamp, class, nickname, quest,
+          rubric_1, rubric_2, rubric_3, rubric_total,
+          guess_mode, guess_value, guess_correct, correct_answer
+        FROM submissions
+    """
+    df = pd.read_sql_query(q, conn)
+    if df.empty:
+        return df
 
+    df["dt"] = pd.to_datetime(df["timestamp"], errors="coerce")
+    df["date"] = df["dt"].dt.date
 
+    if start is not None:
+        df = df[df["date"] >= start]
+    if end is not None:
+        df = df[df["date"] <= end]
+    if classes:
+        df = df[df["class"].isin(classes)]
 
-
-
-
-
-
-
+    return df.sort_values("dt", ascending=False).head(limit).reset_index(drop=True)
 
 
 
