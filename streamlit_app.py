@@ -87,7 +87,7 @@ with st.sidebar:
                 try:
                     st.switch_page("pages/1_교사_대시보드.py")
                 except Exception:
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 st.session_state.teacher_ok = False
                 st.error("비밀번호가 올바르지 않습니다.")
@@ -100,7 +100,7 @@ if st.session_state.get("teacher_ok", False):
         st.switch_page("pages/1_교사_대시보드.py")
     except Exception:
         st.write("교사 대시보드로 이동 중…")
-        st.experimental_rerun()
+        st.rerun()
 
 # ────────── 학생 모드 헤더/입력 ──────────
 st.markdown("<h1 style='margin:0'>Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈</h1>", unsafe_allow_html=True)
