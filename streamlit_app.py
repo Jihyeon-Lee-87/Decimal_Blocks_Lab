@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Decimal Blocks 3D — 학생 모드(덧셈/뺄셈 애니메이션 + 정답 맞혀보기 + 제출) + 교사 인증 시 자동 전환
+# Decimal Blocks 3D — 학생 모드(덧셈/뺄셈 애니메이션 + 정답 맞혀보기 + 제출) + 교사 인증 시 자동 전환(안전)
 import os, base64, time, sqlite3
 from contextlib import closing
 from typing import Optional, Tuple
@@ -73,10 +73,11 @@ def ensure_defaults():
     ss.setdefault("last_correct_answer", None)
 ensure_defaults()
 
-# ────────── 사이드바: 역할 선택(교사 인증 시 자동 전환) + 문제 입력 ──────────
+# ────────── 사이드바: 역할 선택(교사 인증 시 전환) + 문제 입력 ──────────
 with st.sidebar:
     st.markdown("### 역할 선택")
     role = st.radio("역할", ["학생", "교사"], horizontal=True, key="role_sel")
+
     if role == "교사":
         pw = st.text_input("교사 비밀번호", type="password", help="관리자가 정한 비밀번호")
         teacher_pw = os.environ.get("TEACHER_PW", "teacher")  # 없으면 'teacher'
@@ -84,23 +85,31 @@ with st.sidebar:
             if pw == teacher_pw:
                 st.session_state.teacher_ok = True
                 st.success("교사 인증 완료!")
+
+                # ✅ 인증 즉시 교사 대시보드로 전환(스위치 실패 시 링크 제공)
+                switched = False
                 try:
-                    st.switch_page("pages/1_교사_대시보드.py")
+                    st.switch_page("pages/1_teacher_dashboard.py")
+                    switched = True
                 except Exception:
-                    st.rerun()
+                    pass
+                if not switched:
+                    st.page_link("pages/1_teacher_dashboard.py", label="📊 교사 대시보드 열기", icon="📊")
             else:
                 st.session_state.teacher_ok = False
                 st.error("비밀번호가 올바르지 않습니다.")
     else:
         st.session_state.teacher_ok = False
 
-# 본문 보호 가드(이미 인증되어 있으면 즉시 전환)
+# 본문 보호 가드(이미 인증되어 있으면 즉시 전환, 실패 시 링크 제공)
 if st.session_state.get("teacher_ok", False):
     try:
-        st.switch_page("pages/1_교사_대시보드.py")
+        st.switch_page("pages/1_teacher_dashboard.py")
     except Exception:
-        st.write("교사 대시보드로 이동 중…")
-        st.rerun()
+        st.info("교사 대시보드로 이동하려면 아래를 클릭하세요.")
+        st.page_link("pages/1_teacher_dashboard.py", label="📊 교사 대시보드 열기", icon="📊")
+    # 이후 학생용 렌더링은 자동으로 건너뜀
+    st.stop()
 
 # ────────── 학생 모드 헤더/입력 ──────────
 st.markdown("<h1 style='margin:0'>Decimal Blocks 3D - 소수 셋째 자리까지의 덧셈·뺄셈</h1>", unsafe_allow_html=True)
@@ -244,7 +253,7 @@ def play_sound(t: Optional[Tuple[bytes,str]]):
 
 # ────────── 큰 말풍선(메인) ──────────
 ALERT = st.empty()
-def show_alert(text: str, seconds: float = ALERT_SECONDS):
+def show_alert(text: str, seconds: float = 4.0):
     ALERT.markdown(
         f"""
         <div style="display:flex;align-items:center;justify-content:center;margin:8px 0 14px 0;">
@@ -262,58 +271,58 @@ def show_alert(text: str, seconds: float = ALERT_SECONDS):
 
 # ────────── 깜빡임(받아올림/받아내림) ──────────
 def flash_micros_as_rod(ph):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_FLASH); ph.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_THOUS); ph.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_FLASH); ph.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_THOUS); ph.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 def flash_rods_as_plate(ph):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_FLASH); ph.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_HUNDS ); ph.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_FLASH); ph.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_HUNDS ); ph.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 def flash_plates_as_cube(ph_T, ph_O, o_now):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_FLASH); ph_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_TENTHS); ph_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    for _ in range(BLINK_CYCLES):
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_FLASH); ph_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_TENTHS); ph_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    for _ in range(2):
         fig, ax = scene_axes(); draw_cubes(ax, o_now+1, COLOR_FLASH); ph_O.pyplot(fig, True); plt.close(fig); time.sleep(0.25)
         fig, ax = scene_axes(); draw_cubes(ax, o_now,   COLOR_ONES ); ph_O.pyplot(fig, True); plt.close(fig); time.sleep(0.25)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 def flash_one_rod_to_ten_micros(ph_source_H, ph_dest_K):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_rods(ax, 1, COLOR_FLASH); ph_source_H.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_rods(ax, 1, COLOR_HUNDS ); ph_source_H.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_FLASH); ph_dest_K.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_THOUS); ph_dest_K.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_rods(ax, 1, COLOR_FLASH); ph_source_H.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_rods(ax, 1, COLOR_HUNDS ); ph_source_H.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_FLASH); ph_dest_K.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_micros(ax, 10, COLOR_THOUS); ph_dest_K.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 def flash_one_plate_to_ten_rods(ph_source_T, ph_dest_H):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_plates(ax, 1, COLOR_FLASH); ph_source_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_plates(ax, 1, COLOR_TENTHS); ph_source_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_FLASH); ph_dest_H.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_HUNDS ); ph_dest_H.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_plates(ax, 1, COLOR_FLASH); ph_source_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_plates(ax, 1, COLOR_TENTHS); ph_source_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_FLASH); ph_dest_H.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_rods(ax, 10, COLOR_HUNDS ); ph_dest_H.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 def flash_one_cube_to_ten_plates(ph_source_O, ph_dest_T, t_now):
-    time.sleep(CARRY_PAUSE_BEFORE)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_cubes(ax, 1, COLOR_FLASH); ph_source_O.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_cubes(ax, 1, COLOR_ONES ); ph_source_O.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    for _ in range(BLINK_CYCLES):
-        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_FLASH); ph_dest_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_TENTHS); ph_dest_T.pyplot(fig, True); plt.close(fig); time.sleep(BLINK_INTERVAL)
-    time.sleep(CARRY_PAUSE_AFTER); play_sound(SND_TRANS)
+    time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_cubes(ax, 1, COLOR_FLASH); ph_source_O.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_cubes(ax, 1, COLOR_ONES ); ph_source_O.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    for _ in range(2):
+        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_FLASH); ph_dest_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+        fig, ax = scene_axes(); draw_plates(ax, 10, COLOR_TENTHS); ph_dest_T.pyplot(fig, True); plt.close(fig); time.sleep(0.60)
+    time.sleep(0.60); play_sound(SND_TRANS)
 
 # ────────── 공용 숫자/패널 렌더 ──────────
 def number_row(parent_col, o, t, h, k, title):
@@ -540,18 +549,18 @@ with tab_sub:
         if res["h"] > 0:
             flash_one_rod_to_ten_micros(R_H, R_K)
             res["h"] -= 1; res["k"] += 10
-            render_all_sub(label="H"); time.sleep(STEP_DELAY_MOVE); return
+            render_all_sub(label="H"); time.sleep(0.25); return
         if res["t"] > 0:
             show_alert("0.1 하나를 0.01 10개로 바꿔 먼저 내려올게요.")
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
-            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE)
+            render_all_sub(label="T"); time.sleep(0.25)
             borrow_for_k(need); return
         if res["o"] > 0:
             show_alert("1 하나를 0.1 10개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
+            render_all_sub(label="O"); time.sleep(0.25)
             borrow_for_k(need); return
 
     def borrow_for_h(need):
@@ -560,12 +569,12 @@ with tab_sub:
         if res["t"] > 0:
             flash_one_plate_to_ten_rods(R_T, R_H)
             res["t"] -= 1; res["h"] += 10
-            render_all_sub(label="T"); time.sleep(STEP_DELAY_MOVE); return
+            render_all_sub(label="T"); time.sleep(0.25); return
         if res["o"] > 0:
             show_alert("1 하나를 0.1 10개로 바꿔 먼저 내려올게요.")
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE)
+            render_all_sub(label="O"); time.sleep(0.25)
             borrow_for_h(need); return
 
     def borrow_for_t(need):
@@ -574,7 +583,7 @@ with tab_sub:
         if res["o"] > 0:
             flash_one_cube_to_ten_plates(R_O, R_T, res["t"])
             res["o"] -= 1; res["t"] += 10
-            render_all_sub(label="O"); time.sleep(STEP_DELAY_MOVE); return
+            render_all_sub(label="O"); time.sleep(0.25); return
 
     # --- 정답 맞혀보기 (뺄셈) ---
     st.markdown("#### 🧠 정답 맞혀보기 (뺄셈)")
@@ -700,6 +709,7 @@ with st.expander("📝 학습 결과 제출하기 (교사 대시보드로 전송
             st.session_state["last_guess_value"] = None
             st.session_state["last_guess_correct"] = None
             st.session_state["last_correct_answer"] = None
+
 
 
 

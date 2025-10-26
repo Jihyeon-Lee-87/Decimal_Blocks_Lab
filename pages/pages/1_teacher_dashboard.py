@@ -69,7 +69,7 @@ def fetch_all() -> pd.DataFrame:
 topL, topR = st.columns([1, 4])
 with topL:
     if st.button("🔄 새로고침"):
-        st.rerun()
+        st.experimental_rerun()  # 대시보드 페이지 내부에서는 안전하게 사용 가능(또는 생략 가능)
 with topR:
     st.title("📊 교사 대시보드")
     st.caption("모든 시간은 KST(Asia/Seoul) 기준으로 저장·표시됩니다.")
@@ -245,6 +245,7 @@ with tabs[4]:
 st.divider()
 csv = fdf.drop(columns=["dt"]).to_csv(index=False).encode("utf-8-sig")
 st.download_button("CSV 다운로드(필터 적용)", csv, file_name="submissions_filtered.csv", mime="text/csv")
+
 
 
 
